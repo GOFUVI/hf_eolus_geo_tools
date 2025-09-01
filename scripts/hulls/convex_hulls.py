@@ -35,9 +35,18 @@ def main():
             result = result.intersection(h)
 
     geojson = {
-        "type": "Feature",
-        "geometry": mapping(result),
-        "properties": {}
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": mapping(result),
+                "properties": {},
+            }
+        ],
+        "crs": {
+            "type": "name",
+            "properties": {"name": "EPSG:4326"},
+        },
     }
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(geojson, f)
