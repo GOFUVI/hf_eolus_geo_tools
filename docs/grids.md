@@ -6,7 +6,7 @@ The `scripts/grids` directory contains utilities for generating regular grids of
 geographic points and publishing them as GeoParquet datasets in Amazon S3. The
 primary entry point is `create_grid_table.sh`, which orchestrates grid
 construction, uploads the resulting file, and creates an AWS Athena table. Grid
-nodes can be derived from existing Athena tables or supplied manually via CSV.
+nodes can be derived from a GeoJSON hull file or supplied manually via CSV.
 
 ## Requirements
 
@@ -30,24 +30,27 @@ table.
 `--database DATABASE`  
 : Athena database name. *(required)*
 
-`--input-tables TABLE1[,TABLE2,...]`  
-: Comma-separated list of source tables containing WKB point geometries.
-When provided, `--node-prefix` must also be set. Optional.
-
-`--output-table TABLE`  
+`--output-table TABLE`
 : Name of the Athena table to create. *(required)*
 
-`--table-location S3_PATH`  
+`--table-location S3_PATH`
 : S3 destination for the GeoParquet dataset. *(required)*
 
-`--node-prefix PREFIX`  
-: Prefix for generated grid node identifiers. Required with
-`--input-tables`.
+`--hull-file PATH`
+: GeoJSON file describing the area to grid. Required with
+`--node-prefix`.
 
-`--grid-spacing-km KM`  
+`--node-prefix PREFIX`
+: Prefix for generated grid node identifiers. Required with
+`--hull-file`.
+
+`--grid-spacing-km KM`
 : Spacing between grid nodes in kilometers. Default: `10`.
 
-`--region REGION`  
+`--buffer-km KM`
+: Buffer to apply around the hull in kilometers. Default: `0`.
+
+`--region REGION`
 : AWS region. If omitted, the region from the AWS profile is used.
 
 `--output-location S3_PATH`  
@@ -57,13 +60,9 @@ When provided, `--node-prefix` must also be set. Optional.
 : If `overwrite`, any existing data at the table location is deleted before
 uploading the new grid. Default: `overwrite`.
 
-`--bounds-mode union|intersection`  
-: Determines how bounding boxes from multiple input tables are combined.
-Default: `union`.
-
-`--manual-csv PATH`  
+`--manual-csv PATH`
 : CSV file providing `node_id,longitude,latitude`. Required when no
-`--input-tables` are supplied. The grid generated from `--input-tables` can
+`--hull-file` is supplied. The grid generated from the hull can
 also be augmented with these nodes.
 
 `--help`  
@@ -75,7 +74,7 @@ also be augmented with these nodes.
 ./scripts/grids/create_grid_table.sh \
   --profile my-aws \
   --database geodata \
-  --input-tables src_table1,src_table2 \
+  --hull-file hull.geojson \
   --node-prefix G \
   --output-table grid_nodes \
   --table-location s3://my-bucket/grids/grid_nodes/ \
@@ -90,21 +89,28 @@ cases.
 
 ### Options
 
-`--min-lon, --min-lat, --max-lon, --max-lat`  
+`--min-lon, --min-lat, --max-lon, --max-lat`
 : Bounding box coordinates in degrees.
 
-`--spacing-km`  
+`--spacing-km`
 : Grid spacing in kilometers.
 
-`--prefix`  
+`--prefix`
 : Prefix for generated node identifiers.
 
-`--output PATH`  
+`--output PATH`
 : Output GeoParquet file. *(required)*
 
-`--manual-csv PATH`  
+`--manual-csv PATH`
 : Optional CSV of additional nodes to append. When used without bounding
 box parameters, the script writes the CSV nodes directly to GeoParquet.
+
+`--hull PATH`
+: GeoJSON file describing the area to grid. When provided, `--spacing-km`
+and `--prefix` are required.
+
+`--buffer-km KM`
+: Optional buffer to apply around the hull in kilometers.
 
 ### Example
 
@@ -116,8 +122,8 @@ python scripts/grids/create_grid_table.py \
 
 ## Details
 
-1. Bounding boxes derived from input tables can be combined via union or
-   intersection, ensuring that generated grids cover exactly the desired area.
+1. Hull polygons can be buffered to ensure the grid fully covers the desired
+   area while keeping all nodes within the buffered boundary.
 2. Grids are built in the appropriate UTM zone for accurate spacing before being
    transformed back to WGS84 coordinates.
 3. The resulting GeoParquet includes metadata compliant with the GeoParquet

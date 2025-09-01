@@ -5,7 +5,8 @@ import argparse
 import json
 import pandas as pd
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import Point, shape
+from shapely import ops
 import shapely.wkb as wkb
 from pyproj import CRS, Transformer
 import pyarrow as pa
@@ -88,21 +89,48 @@ def main():
     parser.add_argument("--prefix")
     parser.add_argument("--output", required=True)
     parser.add_argument("--manual-csv")
+    parser.add_argument("--hull", help="GeoJSON file defining hull for grid generation")
+    parser.add_argument("--buffer-km", type=float, default=0.0, help="Buffer around hull in kilometers")
     args = parser.parse_args()
 
-    if args.manual_csv and not args.prefix and not all(
+    if args.hull:
+        if args.prefix is None or args.spacing_km is None:
+            parser.error("--hull requires --spacing-km and --prefix")
+        with open(args.hull) as f:
+            geom_json = json.load(f)
+        if "features" in geom_json:
+            poly = shape(geom_json["features"][0]["geometry"])
+        else:
+            poly = shape(geom_json["geometry"])
+        wgs84 = CRS.from_epsg(4326)
+        utm = determine_utm_zone(poly.centroid.x, poly.centroid.y)
+        to_utm = Transformer.from_crs(wgs84, utm, always_xy=True)
+        to_wgs84 = Transformer.from_crs(utm, wgs84, always_xy=True)
+        poly_utm = ops.transform(to_utm.transform, poly)
+        if args.buffer_km:
+            poly_utm = poly_utm.buffer(args.buffer_km * 1000.0)
+        poly_wgs84 = ops.transform(to_wgs84.transform, poly_utm)
+        min_lon, min_lat, max_lon, max_lat = poly_wgs84.bounds
+        grid_df = build_grid(min_lon, min_lat, max_lon, max_lat, args.spacing_km, args.prefix)
+        grid_df = grid_df[grid_df.apply(lambda r: poly_wgs84.covers(Point(r.longitude, r.latitude)), axis=1)]
+        if args.manual_csv:
+            manual_df = pd.read_csv(args.manual_csv)[["node_id", "longitude", "latitude"]]
+            grid_df = pd.concat([grid_df, manual_df], ignore_index=True)
+            grid_df = grid_df.drop_duplicates(subset="node_id")
+        min_lon = float(grid_df["longitude"].min())
+        min_lat = float(grid_df["latitude"].min())
+        max_lon = float(grid_df["longitude"].max())
+        max_lat = float(grid_df["latitude"].max())
+    elif args.manual_csv and not args.prefix and not all(
         v is not None for v in [args.min_lon, args.min_lat, args.max_lon, args.max_lat, args.spacing_km]
     ):
-        # Manual-only mode: read CSV and compute bounds
         grid_df = pd.read_csv(args.manual_csv)[["node_id", "longitude", "latitude"]]
         grid_df = grid_df.drop_duplicates(subset="node_id")
-        # Compute bounds from actual data for GeoParquet bbox
         min_lon = float(grid_df["longitude"].min())
         min_lat = float(grid_df["latitude"].min())
         max_lon = float(grid_df["longitude"].max())
         max_lat = float(grid_df["latitude"].max())
     else:
-        # Grid generation requires all bounding arguments and prefix
         missing = [
             name
             for name, val in [
@@ -124,7 +152,6 @@ def main():
             manual_df = pd.read_csv(args.manual_csv)[["node_id", "longitude", "latitude"]]
             grid_df = pd.concat([grid_df, manual_df], ignore_index=True)
             grid_df = grid_df.drop_duplicates(subset="node_id")
-        # Compute bounds from actual data (grid plus optional manual) for GeoParquet bbox
         min_lon = float(grid_df["longitude"].min())
         min_lat = float(grid_df["latitude"].min())
         max_lon = float(grid_df["longitude"].max())
