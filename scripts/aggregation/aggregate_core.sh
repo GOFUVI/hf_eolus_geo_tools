@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# aggregate.sh
+# aggregate_core.sh
 # -----------------------------------------------------------------------------
 # Description:
 #   Aggregate selected columns by timestamp and grid node using a precomputed
-#   mapping table. Results are written as a GeoParquet dataset in S3 and an
-#   Athena table optionally partitioned by selected columns.
+#   mapping table. Runs the aggregation CTAS in Athena and leaves the raw
+#   Parquet files in S3 along with an Athena table optionally partitioned by
+#   selected columns. Consolidation and GeoParquet metadata should be handled in
+#   a separate step.
 #
 # Usage:
-#   ./aggregate.sh \
+#   ./aggregate_core.sh \
 #     --db-name DB_NAME \
 #     --data-table DATA_TABLE \
 #     --grid-table GRID_TABLE \
@@ -323,44 +325,4 @@ log "Running aggregation query"
 QID=$(run_aws athena start-query-execution --query-string "$CTAS" --query-execution-context "Database=$DB_NAME" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
 wait_for_query "$QID"
 
-# Add GeoParquet metadata by syncing data locally, processing in container, then syncing back
-# S3_PATH already set above
-DATA_DIR=$(mktemp -d "${LOG_DIR}/geo_meta_XXXXXX")
-trap 'rm -rf "$DATA_DIR"' EXIT
-
-log "Syncing dataset from $S3_PATH to $DATA_DIR"
-aws s3 sync "$S3_PATH" "$DATA_DIR" --exclude "query_results/*" --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
-
-# Count downloaded data files (exclude hidden/markers). If none, abort to
-# avoid deleting remote data on sync-back.
-DATA_FILES_COUNT=$(find "$DATA_DIR" -type f \
-  ! -name '.*' ! -name '_*' ! -name 'SUCCESS' | wc -l | awk '{print $1}')
-log "Downloaded files count: ${DATA_FILES_COUNT}"
-if [ "$DATA_FILES_COUNT" -eq 0 ]; then
-  log "No data files found under $S3_PATH after CTAS. Skipping metadata and sync-back to avoid data loss."
-  exit 1
-fi
-
-# Merge Parquet files so there is a single file per partition (or one file overall if no partitions)
-log "Merging Parquet files to a single file per partition"
-docker run --rm \
-  -v "${PWD}":/work \
-  -v "${DATA_DIR}":/data:rw \
-  -w /work \
-  python:3.11-slim bash -lc "pip install --no-cache-dir pyarrow shapely >/tmp/pip.log && python scripts/aggregation/merge_parquet.py --root /data && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column geometry" >> "$LOG_FILE" 2>&1
-
-log "Syncing dataset back to $S3_PATH"
-aws s3 sync "$DATA_DIR" "$S3_PATH" --exclude "query_results/*" --delete --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
-
-# If the table is partitioned, repair partitions to ensure Athena picks up directories after merge
-if [ -n "${PARTITION_ARRAY:-}" ]; then
-  log "Repairing partitions in Athena for ${DB_NAME}.${OUTPUT_TABLE}"
-  QID=$(run_aws athena start-query-execution \
-    --query-string "MSCK REPAIR TABLE ${DB_NAME}.${OUTPUT_TABLE}" \
-    --query-execution-context "Database=${DB_NAME}" \
-    --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" \
-    --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
-  wait_for_query "$QID"
-fi
-
-log "Aggregation completed: table ${DB_NAME}.${OUTPUT_TABLE} at ${S3_PATH}"
+log "Aggregation query completed: table ${DB_NAME}.${OUTPUT_TABLE} at ${S3_PATH}"
