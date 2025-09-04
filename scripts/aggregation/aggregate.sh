@@ -257,8 +257,10 @@ run_aws athena start-query-execution \
   --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/query_results" \
   --region $REGION --profile "$PROFILE" >/dev/null || true
 
-log "Removing any existing data at s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/"
-run_aws s3 rm "s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/" --recursive --profile "$PROFILE" >/dev/null || log "No existing data to remove"
+# Note: Do not pre-delete the target prefix here. We'll use the final
+# sync-back with --delete after successful metadata patching to clean up
+# random filenames. Pre-deleting risks wiping existing data if CTAS yields
+# zero files.
 
 log "Running aggregation query"
 QID=$(run_aws athena start-query-execution --query-string "$CTAS" --query-execution-context "Database=$DB_NAME" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/query_results" --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
@@ -272,6 +274,45 @@ trap 'rm -rf "$DATA_DIR"' EXIT
 log "Syncing dataset from $S3_PATH to $DATA_DIR"
 aws s3 sync "$S3_PATH" "$DATA_DIR" --exclude "query_results/*" --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
 
+# Count downloaded data files (exclude hidden/markers). If none, abort to
+# avoid deleting remote data on sync-back.
+DATA_FILES_COUNT=$(find "$DATA_DIR" -type f \
+  ! -name '.*' ! -name '_*' ! -name 'SUCCESS' | wc -l | awk '{print $1}')
+log "Downloaded files count: ${DATA_FILES_COUNT}"
+if [ "$DATA_FILES_COUNT" -eq 0 ]; then
+  log "No data files found under $S3_PATH after CTAS. Skipping metadata and sync-back to avoid data loss."
+  exit 1
+fi
+
+# Rename random Parquet filenames to match the last partition value
+log "Renaming Parquet files to match partition names (collision-safe)"
+# For each Parquet file, rename to <last_partition_value>_<index>.parquet
+# - Idempotent: if already matches pattern, skip.
+# - Collision-safe: choose next available index in the directory.
+find "$DATA_DIR" -type f -name '*.parquet' | while read -r file; do
+  dir=$(dirname "$file")
+  partition=$(basename "$dir")
+  case "$partition" in
+    *=*) : ;; # ok
+    *) continue ;; # not a partition leaf dir
+  esac
+  value="${partition#*=}"
+  base=$(basename "$file")
+  # Skip if already in desired pattern
+  if [[ "$base" =~ ^${value}_[0-9]+\.parquet$ ]]; then
+    continue
+  fi
+  # Determine next index
+  next_idx=$(find "$dir" -maxdepth 1 -type f -name "${value}_*.parquet" | wc -l | awk '{print $1}')
+  target="$dir/${value}_${next_idx}.parquet"
+  # Ensure uniqueness in case of gaps
+  while [ -e "$target" ]; do
+    next_idx=$((next_idx + 1))
+    target="$dir/${value}_${next_idx}.parquet"
+  done
+  mv "$file" "$target"
+done
+
 log "Adding GeoParquet metadata locally via container"
 docker run --rm \
   -v "${PWD}":/work \
@@ -280,7 +321,6 @@ docker run --rm \
   python:3.11-slim bash -lc "pip install --no-cache-dir pyarrow shapely >/tmp/pip.log && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column geometry" >> "$LOG_FILE" 2>&1
 
 log "Syncing dataset back to $S3_PATH"
-aws s3 sync "$DATA_DIR" "$S3_PATH" --exclude "query_results/*" --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
+aws s3 sync "$DATA_DIR" "$S3_PATH" --exclude "query_results/*" --delete --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
 
 log "Aggregation completed: table ${DB_NAME}.${OUTPUT_TABLE} at ${S3_PATH}"
-
