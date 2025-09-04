@@ -5,7 +5,7 @@
 # Description:
 #   Aggregate selected columns by timestamp and grid node using a precomputed
 #   mapping table. Results are written as a GeoParquet dataset in S3 and an
-#   Athena table partitioned like the source data table.
+#   Athena table optionally partitioned by selected columns.
 #
 # Usage:
 #   ./aggregate.sh \
@@ -21,6 +21,7 @@
 #     [--grid-db-name GRID_DB] \
 #     [--mapping-db-name MAP_DB] \
 #     [--timestamp-col COL] \
+#     [--partition-cols COL1,COL2] \
 #     [--profile PROFILE] \
 #     [--log-dir DIR] \
 #     [--help]
@@ -82,9 +83,14 @@ BUCKET_NAME=""
 OUTPUT_PREFIX=""
 OUTPUT_TABLE=""
 TIMESTAMP_COL="timestamp"
+PARTITION_COLS=""
+# Ensure arrays exist even when no options provided
+declare -a PART_COLS
+declare -a SRC_PART_COLS
+declare -a PARTITION_BY
 
 SHORTOPTS=""
-LONGOPTS="db-name:,data-db-name:,grid-db-name:,mapping-db-name:,data-table:,grid-table:,mapping-table:,columns:,bucket-name:,output-prefix:,output-table:,timestamp-col:,profile:,log-dir:,help"
+LONGOPTS="db-name:,data-db-name:,grid-db-name:,mapping-db-name:,data-table:,grid-table:,mapping-table:,columns:,bucket-name:,output-prefix:,output-table:,timestamp-col:,partition-cols:,profile:,log-dir:,help"
 PARSED=$(getopt --options="$SHORTOPTS" --longoptions="$LONGOPTS" --name "$0" -- "$@") || { usage; exit 2; }
 eval set -- "$PARSED"
 while true; do
@@ -101,6 +107,7 @@ while true; do
     --output-prefix) OUTPUT_PREFIX="$2"; shift 2;;
     --output-table) OUTPUT_TABLE="$2"; shift 2;;
     --timestamp-col) TIMESTAMP_COL="$2"; shift 2;;
+    --partition-cols) PARTITION_COLS="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --help) usage; exit 0;;
@@ -149,10 +156,25 @@ fi
 
 # Retrieve partition columns from source data table
 log "Retrieving partition columns for ${DATA_DB}.${DATA_TABLE}"
-PART_COLS=$(run_aws glue get-table --database-name "$DATA_DB" --name "$DATA_TABLE" --profile "$PROFILE" --region "$REGION" | jq -r '.Table.PartitionKeys[].Name')
+SRC_PART_COLS=($(run_aws glue get-table --database-name "$DATA_DB" --name "$DATA_TABLE" --profile "$PROFILE" --region "$REGION" | jq -r '.Table.PartitionKeys[].Name'))
+
+PART_COLS=()
+if [ -n "$PARTITION_COLS" ]; then
+  IFS=',' read -r -a PC_INPUT <<< "$PARTITION_COLS"
+  for pc in "${PC_INPUT[@]}"; do
+    pc_trim=$(echo "$pc" | xargs)
+    if [[ " ${SRC_PART_COLS[*]} " != *" ${pc_trim} "* ]]; then
+      log "Unknown partition column: ${pc_trim}"
+      exit 1
+    fi
+    PART_COLS+=("$pc_trim")
+  done
+fi
+
 PARTITION_BY=()
-for pc in $PART_COLS; do
-  # Exclude the timestamp column from dynamic parts; it's handled explicitly
+SELECT_PARTS=""
+GROUP_PARTS=""
+for pc in ${PART_COLS[@]+"${PART_COLS[@]}"}; do
   if [ "$pc" = "$TIMESTAMP_COL" ]; then
     PARTITION_BY+=("'${pc}'")
     continue
@@ -167,7 +189,7 @@ GROUP_PARTS=${GROUP_PARTS:-}
 # Build join conditions per partition key for CTE joins
 JOIN_BA_EXTRA=""
 JOIN_AM_EXTRA=""
-for pc in $PART_COLS; do
+for pc in ${PART_COLS[@]+"${PART_COLS[@]}"}; do
   [ "$pc" = "$TIMESTAMP_COL" ] && continue
   JOIN_BA_EXTRA+=" AND b.${pc} = a.${pc}"
   JOIN_AM_EXTRA+=" AND a.${pc} = m.${pc}"
@@ -207,8 +229,13 @@ AGG_STATS_SQL=$(printf ', %s' "${AGG_STATS[@]}"); AGG_STATS_SQL=${AGG_STATS_SQL:
 MAD_STATS_SQL=$(printf ', %s' "${MAD_STATS[@]}"); MAD_STATS_SQL=${MAD_STATS_SQL:2}
 SELECT_OUTPUT_SQL=$(printf ', %s' "${SELECT_OUTPUT[@]}"); SELECT_OUTPUT_SQL=${SELECT_OUTPUT_SQL:2}
 
-PARTITION_ARRAY=$(printf ', %s' "${PARTITION_BY[@]}")
-PARTITION_ARRAY=${PARTITION_ARRAY:2}
+# Build partition array safely when empty
+if (( ${#PARTITION_BY[@]} )); then
+  PARTITION_ARRAY=$(printf ', %s' "${PARTITION_BY[@]}")
+  PARTITION_ARRAY=${PARTITION_ARRAY:2}
+else
+  PARTITION_ARRAY=""
+fi
 
 SELECT_PARTS=${SELECT_PARTS%,}
 GROUP_PARTS=${GROUP_PARTS%,}
@@ -219,12 +246,36 @@ KEYS_GROUP="d.${TIMESTAMP_COL}, m.node_id, g.geometry${GROUP_PARTS:+, ${GROUP_PA
 SELECT_PARTS_B=${SELECT_PARTS//d./b.}
 SELECT_PARTS_A=${SELECT_PARTS//d./a.}
 
-# Build partition select list for final projection, ensuring order and placing last
+# Build partition select lists for final projection
 PARTITION_SELECT_A_LIST=()
-for pc in $PART_COLS; do
+PARTITION_SELECT_A_NO_TS_LIST=()
+TIMESTAMP_IN_PARTITION=false
+for pc in ${PART_COLS[@]+"${PART_COLS[@]}"}; do
   PARTITION_SELECT_A_LIST+=("a.${pc}")
+  if [ "$pc" = "$TIMESTAMP_COL" ]; then
+    TIMESTAMP_IN_PARTITION=true
+  else
+    PARTITION_SELECT_A_NO_TS_LIST+=("a.${pc}")
+  fi
 done
-PARTITION_SELECT_A=$(printf ', %s' "${PARTITION_SELECT_A_LIST[@]}"); PARTITION_SELECT_A=${PARTITION_SELECT_A:2}
+if (( ${#PARTITION_SELECT_A_LIST[@]} )); then
+  PARTITION_SELECT_A=$(printf ', %s' "${PARTITION_SELECT_A_LIST[@]}")
+  PARTITION_SELECT_A=${PARTITION_SELECT_A:2}
+else
+  PARTITION_SELECT_A=""
+fi
+if (( ${#PARTITION_SELECT_A_NO_TS_LIST[@]} )); then
+  PARTITION_SELECT_A_NO_TS=$(printf ', %s' "${PARTITION_SELECT_A_NO_TS_LIST[@]}")
+  PARTITION_SELECT_A_NO_TS=${PARTITION_SELECT_A_NO_TS:2}
+else
+  PARTITION_SELECT_A_NO_TS=""
+fi
+
+if [ "$TIMESTAMP_IN_PARTITION" = true ]; then
+  FINAL_SELECT="SELECT a.node_id, a.geometry, a.n${SELECT_OUTPUT_SQL:+, ${SELECT_OUTPUT_SQL}}${PARTITION_SELECT_A:+, ${PARTITION_SELECT_A}}"
+else
+  FINAL_SELECT="SELECT a.${TIMESTAMP_COL}, a.node_id, a.geometry, a.n${SELECT_OUTPUT_SQL:+, ${SELECT_OUTPUT_SQL}}${PARTITION_SELECT_A_NO_TS:+, ${PARTITION_SELECT_A_NO_TS}}"
+fi
 
 QUERY="WITH base AS (
   SELECT ${KEYS_SELECT}${BASE_COLS_SQL:+, ${BASE_COLS_SQL}}
@@ -243,7 +294,7 @@ mad AS (
   JOIN agg a ON b.${TIMESTAMP_COL} = a.${TIMESTAMP_COL} AND b.node_id = a.node_id AND b.geometry = a.geometry${JOIN_BA_EXTRA}
   GROUP BY b.${TIMESTAMP_COL}, b.node_id, b.geometry${GROUP_PARTS:+, ${GROUP_PARTS//d./b.}}
 )
-SELECT a.node_id, a.geometry, a.n${SELECT_OUTPUT_SQL:+, ${SELECT_OUTPUT_SQL}}${PARTITION_SELECT_A:+, ${PARTITION_SELECT_A}}
+${FINAL_SELECT}
 FROM agg a
 JOIN mad m ON a.${TIMESTAMP_COL} = m.${TIMESTAMP_COL} AND a.node_id = m.node_id AND a.geometry = m.geometry${JOIN_AM_EXTRA}"
 
@@ -254,20 +305,26 @@ log "Dropping existing table if present: ${DB_NAME}.${OUTPUT_TABLE}"
 run_aws athena start-query-execution \
   --query-string "DROP TABLE IF EXISTS ${DB_NAME}.${OUTPUT_TABLE}" \
   --query-execution-context "Database=${DB_NAME}" \
-  --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/query_results" \
+  --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" \
   --region $REGION --profile "$PROFILE" >/dev/null || true
 
-# Note: Do not pre-delete the target prefix here. We'll use the final
-# sync-back with --delete after successful metadata patching to clean up
-# random filenames. Pre-deleting risks wiping existing data if CTAS yields
-# zero files.
+## Pre-clean target S3 prefix to ensure a fresh run
+S3_PATH="s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}"
+log "Pre-cleaning target S3 prefix: ${S3_PATH}"
+# Safety guards: refuse to delete if prefix is empty or root
+if [ -z "${OUTPUT_PREFIX}" ] || [ "${OUTPUT_PREFIX}" = "/" ]; then
+  log "Refusing to delete empty/root S3 prefix. Check --output-prefix."
+  exit 1
+fi
+# Proceed with recursive delete of target prefix (including any prior query_results)
+aws s3 rm "${S3_PATH}" --recursive --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1 || true
 
 log "Running aggregation query"
-QID=$(run_aws athena start-query-execution --query-string "$CTAS" --query-execution-context "Database=$DB_NAME" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}/query_results" --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
+QID=$(run_aws athena start-query-execution --query-string "$CTAS" --query-execution-context "Database=$DB_NAME" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
 wait_for_query "$QID"
 
 # Add GeoParquet metadata by syncing data locally, processing in container, then syncing back
-S3_PATH="s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}"
+# S3_PATH already set above
 DATA_DIR=$(mktemp -d "${LOG_DIR}/geo_meta_XXXXXX")
 trap 'rm -rf "$DATA_DIR"' EXIT
 
@@ -284,43 +341,26 @@ if [ "$DATA_FILES_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-# Rename random Parquet filenames to match the last partition value
-log "Renaming Parquet files to match partition names (collision-safe)"
-# For each Parquet file, rename to <last_partition_value>_<index>.parquet
-# - Idempotent: if already matches pattern, skip.
-# - Collision-safe: choose next available index in the directory.
-find "$DATA_DIR" -type f -name '*.parquet' | while read -r file; do
-  dir=$(dirname "$file")
-  partition=$(basename "$dir")
-  case "$partition" in
-    *=*) : ;; # ok
-    *) continue ;; # not a partition leaf dir
-  esac
-  value="${partition#*=}"
-  base=$(basename "$file")
-  # Skip if already in desired pattern
-  if [[ "$base" =~ ^${value}_[0-9]+\.parquet$ ]]; then
-    continue
-  fi
-  # Determine next index
-  next_idx=$(find "$dir" -maxdepth 1 -type f -name "${value}_*.parquet" | wc -l | awk '{print $1}')
-  target="$dir/${value}_${next_idx}.parquet"
-  # Ensure uniqueness in case of gaps
-  while [ -e "$target" ]; do
-    next_idx=$((next_idx + 1))
-    target="$dir/${value}_${next_idx}.parquet"
-  done
-  mv "$file" "$target"
-done
-
-log "Adding GeoParquet metadata locally via container"
+# Merge Parquet files so there is a single file per partition (or one file overall if no partitions)
+log "Merging Parquet files to a single file per partition"
 docker run --rm \
   -v "${PWD}":/work \
   -v "${DATA_DIR}":/data:rw \
   -w /work \
-  python:3.11-slim bash -lc "pip install --no-cache-dir pyarrow shapely >/tmp/pip.log && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column geometry" >> "$LOG_FILE" 2>&1
+  python:3.11-slim bash -lc "pip install --no-cache-dir pyarrow shapely >/tmp/pip.log && python scripts/aggregation/merge_parquet.py --root /data && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column geometry" >> "$LOG_FILE" 2>&1
 
 log "Syncing dataset back to $S3_PATH"
 aws s3 sync "$DATA_DIR" "$S3_PATH" --exclude "query_results/*" --delete --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
+
+# If the table is partitioned, repair partitions to ensure Athena picks up directories after merge
+if [ -n "${PARTITION_ARRAY:-}" ]; then
+  log "Repairing partitions in Athena for ${DB_NAME}.${OUTPUT_TABLE}"
+  QID=$(run_aws athena start-query-execution \
+    --query-string "MSCK REPAIR TABLE ${DB_NAME}.${OUTPUT_TABLE}" \
+    --query-execution-context "Database=${DB_NAME}" \
+    --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" \
+    --region $REGION --profile "$PROFILE" --output text --query 'QueryExecutionId')
+  wait_for_query "$QID"
+fi
 
 log "Aggregation completed: table ${DB_NAME}.${OUTPUT_TABLE} at ${S3_PATH}"
