@@ -40,13 +40,16 @@
 
 usage() {
     cat <<EOF
-Usage: $0 --db-name DB_NAME --data-table DATA_TABLE --grid-table GRID_TABLE \\
+Usage: $0 --db-name DB_NAME [--data-db-name DATA_DB] [--grid-db-name GRID_DB] \\
+           --data-table DATA_TABLE --grid-table GRID_TABLE \\
            --bucket-name BUCKET_NAME --output-prefix OUTPUT_PREFIX \\
            --output-table OUTPUT_TABLE [--distance-km KM] [--profile PROFILE] \\
            [--log-dir LOG_DIR] [--help]
 
 Options:
-  --db-name DB_NAME         Athena database containing the tables.
+  --db-name DB_NAME         Athena database for the output table; also default for inputs.
+  --data-db-name DATA_DB    Athena database for the data table (optional).
+  --grid-db-name GRID_DB    Athena database for the grid table (optional).
   --data-table DATA_TABLE   Source table with rowid and geometry.
   --grid-table GRID_TABLE   Grid table with node_id and geometry.
   --bucket-name BUCKET      S3 bucket for the output Parquet table.
@@ -93,6 +96,8 @@ wait_for_query() {
 ORIG_PWD="$(pwd)"
 PROFILE="default"
 DB_NAME=""
+DATA_DB_NAME=""
+GRID_DB_NAME=""
 DATA_TABLE=""
 GRID_TABLE=""
 BUCKET_NAME=""
@@ -101,13 +106,17 @@ OUTPUT_TABLE=""
 DISTANCE_KM="10"
 
 SHORTOPTS=""
-LONGOPTS="db-name:,data-table:,grid-table:,bucket-name:,output-prefix:,output-table:,distance-km:,distance:,profile:,log-dir:,help"
+LONGOPTS="db-name:,data-db-name:,grid-db-name:,data-table:,grid-table:,bucket-name:,output-prefix:,output-table:,distance-km:,distance:,profile:,log-dir:,help"
 PARSED_OPTS=$(getopt --options="$SHORTOPTS" --longoptions="$LONGOPTS" --name "$0" -- "$@") || { usage; exit 2; }
 eval set -- "$PARSED_OPTS"
 while true; do
     case "$1" in
         --db-name)
             DB_NAME="$2"; shift 2;;
+        --data-db-name)
+            DATA_DB_NAME="$2"; shift 2;;
+        --grid-db-name)
+            GRID_DB_NAME="$2"; shift 2;;
         --data-table)
             DATA_TABLE="$2"; shift 2;;
         --grid-table)
@@ -149,7 +158,12 @@ rm -f "$LOG_FILE"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "$LOG_FILE"; }
 
 REGION="eu-west-3"
-log "Using database: $DB_NAME"
+# Resolve per-table databases, defaulting to --db-name when not provided
+DATA_DB="${DATA_DB_NAME:-$DB_NAME}"
+GRID_DB="${GRID_DB_NAME:-$DB_NAME}"
+
+log "Using output database: $DB_NAME"
+log "Using input databases: data=$DATA_DB, grid=$GRID_DB"
 
 log "Dropping existing table if present"
 output=$(run_aws athena start-query-execution \
@@ -178,14 +192,14 @@ data_pts AS (
            ST_Y(ST_GeomFromBinary(geometry)) AS lat,
            ST_X(ST_GeomFromBinary(geometry)) AS lon,
            geometry
-    FROM $DB_NAME.$DATA_TABLE
+    FROM $DATA_DB.$DATA_TABLE
 ),
 grid_pts AS (
     SELECT node_id,
            ST_Y(ST_GeomFromBinary(geometry)) AS lat,
            ST_X(ST_GeomFromBinary(geometry)) AS lon,
            geometry
-    FROM $DB_NAME.$GRID_TABLE
+    FROM $GRID_DB.$GRID_TABLE
 ),
 deltas AS (
     SELECT d.rowid, d.lat, d.lon, d.geometry AS d_geom, p.r_km,

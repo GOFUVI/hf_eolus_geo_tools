@@ -17,7 +17,13 @@ This script drops any existing output table, removes previous data at the destin
 ### Options
 
 `--db-name DB_NAME`
-: Athena database containing the input and output tables. *(required)*
+: Athena database for the output table. Also used as the default database for input tables unless overridden. *(required)*
+
+`--data-db-name DATA_DB`
+: Athena database for the data input table. *(optional)*
+
+`--grid-db-name GRID_DB`
+: Athena database for the grid input table. *(optional)*
 
 `--data-table DATA_TABLE`
 : Source table with `rowid` and WKB `geometry` columns. *(required)*
@@ -60,6 +66,24 @@ This script drops any existing output table, removes previous data at the destin
   --profile my-aws
 ```
 
+### Cross-Database Inputs
+
+You can place the data and grid tables in different Athena databases while writing the output to a third database. Use `--data-db-name` and `--grid-db-name` to override the defaults:
+
+```bash
+./scripts/mapping/geo_mapping.sh \
+  --db-name mappings_db \            # output table database
+  --data-db-name raw_db \             # data table database
+  --grid-db-name reference_db \       # grid table database
+  --data-table sensor_points \        # table in raw_db
+  --grid-table grid_nodes \           # table in reference_db
+  --bucket-name my-bucket \
+  --output-prefix mappings/sensor_points/ \
+  --output-table sensor_node_links \
+  --distance-km 5 \
+  --profile my-aws
+```
+
 ## SQL Logic
 
 The script issues two key Athena statements.
@@ -87,14 +111,14 @@ data_pts AS (
            ST_Y(ST_GeomFromBinary(geometry)) AS lat,
            ST_X(ST_GeomFromBinary(geometry)) AS lon,
            geometry
-    FROM <db_name>.<data_table>
+    FROM <data_db>.<data_table>
 ),
 grid_pts AS (
     SELECT node_id,
            ST_Y(ST_GeomFromBinary(geometry)) AS lat,
            ST_X(ST_GeomFromBinary(geometry)) AS lon,
            geometry
-    FROM <db_name>.<grid_table>
+    FROM <grid_db>.<grid_table>
 ),
 deltas AS (
     SELECT d.rowid, d.lat, d.lon, d.geometry AS d_geom, p.r_km,
@@ -136,4 +160,3 @@ WHERE ST_Distance(
 
 - Ensure `aws` and `jq` are available in the PATH.
 - The log file is written to `geo_mapping.sh.log` in the specified log directory.
-
