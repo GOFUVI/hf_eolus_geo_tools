@@ -12,11 +12,16 @@ set -euo pipefail
 
 usage() {
   cat <<USAGE
-Usage: $0 [options] --direction-cols COL1,COL2
+Usage: $0 [options] --direction-cols COL1,COL2 [--magnitude-cols MAG1,MAG2]
 
 Options are the same as for aggregate_core.sh. The new option
   --direction-cols  Comma-separated list of directional columns to treat
                     using circular statistics.
+  --magnitude-cols  Comma-separated list paired 1:1 with --direction-cols.
+                    Use a column name to weight that direction, or the
+                    literal 'skip' to treat that direction as unit magnitude.
+                    Magnitudes keep their usual scalar stats; no extra
+                    magnitude outputs.
 USAGE
 }
 
@@ -34,6 +39,19 @@ on_err(){
   echo "$msg" >&2
 }
 trap on_err ERR
+
+save_sql(){
+  # save_sql "name" "SQL STRING"
+  local name="$1"
+  local sql="$2"
+  SQL_IDX=$((SQL_IDX+1))
+  local idx
+  idx=$(printf "%02d" "$SQL_IDX")
+  local base_out="${ORIG_OUTPUT_TABLE:-${OUTPUT_TABLE:-agg}}"
+  local file="${SQL_DIR}/${base_out}_${idx}_${name}.sql"
+  printf "%s\n" "$sql" > "$file"
+  echo "Saved SQL -> $file" >> "$LOG_FILE"
+}
 
 run_aws(){
   echo "Running: aws $*" >> "$LOG_FILE"
@@ -61,6 +79,7 @@ die() { echo "$*" >&2; usage >&2; exit 2; }
 
 # Defaults
 DIRECTION_COLS=""
+MAGNITUDE_COLS=""
 DB_NAME=""
 DATA_DB_NAME=""
 GRID_DB_NAME=""
@@ -82,6 +101,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --help) usage; exit 0;;
     --direction-cols) [ $# -ge 2 ] || die "--direction-cols requires a value"; DIRECTION_COLS="$2"; shift 2;;
+    --magnitude-cols) [ $# -ge 2 ] || die "--magnitude-cols requires a value"; MAGNITUDE_COLS="$2"; shift 2;;
     --db-name) [ $# -ge 2 ] || die "--db-name requires a value"; DB_NAME="$2"; shift 2;;
     --data-db-name) [ $# -ge 2 ] || die "--data-db-name requires a value"; DATA_DB_NAME="$2"; shift 2;;
     --grid-db-name) [ $# -ge 2 ] || die "--grid-db-name requires a value"; GRID_DB_NAME="$2"; shift 2;;
@@ -110,14 +130,19 @@ if [ -z "${REGION:-}" ]; then
   REGION="eu-west-3"
 fi
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/aggregate_direction_wrapper.log"
+# Name log with output table to identify origin; overwrite each run
+LOG_FILE="$LOG_DIR/aggregate_direction_wrapper_${OUTPUT_TABLE}.log"
 # Truncate log on each run
 : > "$LOG_FILE"
+SQL_IDX=0
+# Save SQLs directly under log dir (no subfolder)
+SQL_DIR="$LOG_DIR"
 log "Starting aggregate_direction_wrapper"
 log "Profile=$PROFILE Region=$REGION LogDir=$LOG_DIR"
+log "SQL files directory: $SQL_DIR"
 log "DB=$DB_NAME DataDB=${DATA_DB_NAME:-$DB_NAME} GridDB=${GRID_DB_NAME:-$DB_NAME} MapDB=${MAP_DB_NAME:-$DB_NAME}"
 log "DataTable=$DATA_TABLE GridTable=$GRID_TABLE MapTable=$MAP_TABLE"
-log "Columns(original)=$COLUMNS DirCols=$DIRECTION_COLS Timestamp=$TIMESTAMP_COL Partitions=${PARTITION_COLS:-<none>}"
+log "Columns(original)=$COLUMNS DirCols=$DIRECTION_COLS MagCols=${MAGNITUDE_COLS:-<none>} Timestamp=$TIMESTAMP_COL Partitions=${PARTITION_COLS:-<none>}"
 log "Bucket=$BUCKET_NAME OutPrefix=$OUTPUT_PREFIX OutTable=$OUTPUT_TABLE"
 
 ORIG_COLUMNS="$COLUMNS"
@@ -125,23 +150,39 @@ ORIG_OUTPUT_PREFIX="$OUTPUT_PREFIX"
 ORIG_OUTPUT_TABLE="$OUTPUT_TABLE"
 
 DIR_ARRAY=()
+MAG_ARRAY=()
 if [ -n "$DIRECTION_COLS" ]; then
   IFS=',' read -r -a DIR_ARRAY <<< "$DIRECTION_COLS"
+fi
+if [ -n "$MAGNITUDE_COLS" ]; then
+  IFS=',' read -r -a MAG_ARRAY <<< "$MAGNITUDE_COLS"
+fi
+
+# Validate pairing lengths if magnitudes provided
+if (( ${#MAG_ARRAY[@]} > 0 )); then
+  if (( ${#DIR_ARRAY[@]} == 0 )); then
+    die "--magnitude-cols requires --direction-cols"
+  fi
+  if (( ${#MAG_ARRAY[@]} != ${#DIR_ARRAY[@]} )); then
+    die "--magnitude-cols must have same number of items as --direction-cols"
+  fi
 fi
 
 NON_DIR_COLS=()
 if [ -n "$ORIG_COLUMNS" ]; then
   IFS=',' read -r -a ALL_COLS <<< "$ORIG_COLUMNS"
   for col in "${ALL_COLS[@]}"; do
+    c_trim=$(echo "$col" | xargs)
     skip=false
+    # Exclude directional columns
     for d in "${DIR_ARRAY[@]}"; do
-      if [ "$col" = "$d" ]; then
-        skip=true
-        break
+      if [ "$c_trim" = "$d" ]; then
+        skip=true; break
       fi
     done
+    # Do not exclude magnitude columns here; keep original scalar stats
     if [ "$skip" = false ]; then
-      NON_DIR_COLS+=("$col")
+      NON_DIR_COLS+=("$c_trim")
     fi
   done
 fi
@@ -163,24 +204,53 @@ if [ -n "$DIRECTION_COLS" ]; then
   TMP_OUTPUT_TABLE="${OUTPUT_TABLE}_raw"
 
   SELECT_LIST="*"
-  for col in "${DIR_ARRAY[@]}"; do
-    SELECT_LIST="${SELECT_LIST}, sin(${col} * pi()/180) AS ${col}_sin, cos(${col} * pi()/180) AS ${col}_cos"
-    # remove from columns and add sin/cos
-    COLUMNS=${COLUMNS/,${col}/}
-    COLUMNS=${COLUMNS/${col},/}
-    COLUMNS=${COLUMNS/${col}/}
-    if [ -n "$COLUMNS" ]; then
-      COLUMNS="${COLUMNS},${col}_sin,${col}_cos"
+  for idx in "${!DIR_ARRAY[@]}"; do
+    col="${DIR_ARRAY[$idx]}"
+    mag=""
+    if (( ${#MAG_ARRAY[@]} > 0 )); then
+      mag_raw="${MAG_ARRAY[$idx]}"; mag=$(echo "$mag_raw" | xargs); mag_lc=$(echo "$mag" | tr '[:upper:]' '[:lower:]')
+      # Interpret 'skip' as unit magnitude (unweighted)
+      if [ "$mag_lc" = "skip" ]; then mag=""; fi
+    fi
+    if [ -n "$mag" ]; then
+      # Magnitude-weighted components
+      SELECT_LIST="${SELECT_LIST}, (sin(${col} * pi()/180) * ${mag}) AS ${col}_sin, (cos(${col} * pi()/180) * ${mag}) AS ${col}_cos"
+      # Ensure direction removed from aggregation list; keep magnitude for scalar stats
+      COLUMNS=${COLUMNS/,${col}/}
+      COLUMNS=${COLUMNS/${col},/}
+      COLUMNS=${COLUMNS/${col}/}
+      # Add trig components
+      if [ -n "$COLUMNS" ]; then
+        COLUMNS="${COLUMNS},${col}_sin,${col}_cos"
+      else
+        COLUMNS="${col}_sin,${col}_cos"
+      fi
+      # Ensure magnitude is included in aggregation columns
+      if [[ ",$COLUMNS," != *",${mag},"* ]]; then
+        COLUMNS="${COLUMNS},${mag}"
+      fi
     else
-      COLUMNS="${col}_sin,${col}_cos"
+      # Unweighted (unit) components
+      SELECT_LIST="${SELECT_LIST}, sin(${col} * pi()/180) AS ${col}_sin, cos(${col} * pi()/180) AS ${col}_cos"
+      # remove direction from columns and add sin/cos
+      COLUMNS=${COLUMNS/,${col}/}
+      COLUMNS=${COLUMNS/${col},/}
+      COLUMNS=${COLUMNS/${col}/}
+      if [ -n "$COLUMNS" ]; then
+        COLUMNS="${COLUMNS},${col}_sin,${col}_cos"
+      else
+        COLUMNS="${col}_sin,${col}_cos"
+      fi
     fi
   done
 
   TRIG_PREFIX="${OUTPUT_PREFIX%/}_trig_tmp"
   # Ensure clean temp table and S3 prefix to avoid HIVE_PATH_ALREADY_EXISTS
   log "Pre-cleaning temp trig table and prefix"
+  SQL_DROP_TRIG="DROP TABLE IF EXISTS ${TMP_DATA_DB}.${TMP_DATA_TABLE}"
+  save_sql "01_drop_trig_tmp_table" "$SQL_DROP_TRIG"
   run_aws athena start-query-execution \
-    --query-string "DROP TABLE IF EXISTS ${TMP_DATA_DB}.${TMP_DATA_TABLE}" \
+    --query-string "$SQL_DROP_TRIG" \
     --query-execution-context "Database=${TMP_DATA_DB}" \
     --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TRIG_PREFIX}_athena" \
     --region "$REGION" --profile "$PROFILE" >/dev/null || true
@@ -191,6 +261,7 @@ if [ -n "$DIRECTION_COLS" ]; then
   aws s3 rm "s3://${BUCKET_NAME}/${TRIG_PREFIX}" --recursive --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1 || true
 
   PRE_CTAS="CREATE TABLE ${TMP_DATA_DB}.${TMP_DATA_TABLE} WITH (format='PARQUET', external_location='s3://${BUCKET_NAME}/${TRIG_PREFIX}') AS SELECT ${SELECT_LIST} FROM ${DATA_DB_NAME:-$DB_NAME}.${DATA_TABLE}"
+  save_sql "02_create_trig_tmp_table" "$PRE_CTAS"
   log "Creating temporary table with trig components: ${TMP_DATA_TABLE}"
   QID=$(run_aws athena start-query-execution --query-string "$PRE_CTAS" --query-execution-context "Database=${TMP_DATA_DB}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TRIG_PREFIX}_athena" --region "$REGION" --profile "$PROFILE" --output text --query 'QueryExecutionId')
   wait_for_query "$QID"
@@ -246,15 +317,39 @@ if [ -n "$DIRECTION_COLS" ]; then
   for col in "${NON_DIR_COLS[@]}"; do
     POST_SELECT="${POST_SELECT}, ${col}_mean, ${col}_median, ${col}_stddev, ${col}_min, ${col}_max, ${col}_n, ${col}_mad"
   done
-  for col in "${DIR_ARRAY[@]}"; do
-    POST_SELECT="${POST_SELECT}, atan2(${col}_sin_mean, ${col}_cos_mean) * 180 / pi() AS ${col}_mean, atan2(${col}_sin_median, ${col}_cos_median) * 180 / pi() AS ${col}_median, sqrt(-2 * ln(GREATEST(sqrt(${col}_sin_mean*${col}_sin_mean + ${col}_cos_mean*${col}_cos_mean), 1e-9))) AS ${col}_stddev, sqrt(-2 * ln(GREATEST(sqrt(${col}_sin_mad*${col}_sin_mad + ${col}_cos_mad*${col}_cos_mad), 1e-9))) AS ${col}_mad, ${col}_sin_n AS ${col}_n"
+  for idx in "${!DIR_ARRAY[@]}"; do
+    col="${DIR_ARRAY[$idx]}"
+    mag=""
+    if (( ${#MAG_ARRAY[@]} > 0 )); then
+      mag_raw="${MAG_ARRAY[$idx]}"; mag=$(echo "$mag_raw" | xargs); mag_lc=$(echo "$mag" | tr '[:upper:]' '[:lower:]')
+      if [ "$mag_lc" = "skip" ]; then mag=""; fi
+    fi
+    if [ -n "$mag" ]; then
+      # Normalize resultant length by mean magnitude to keep in [0,1]
+      POST_SELECT="${POST_SELECT}, \
+        atan2(${col}_sin_mean, ${col}_cos_mean) * 180 / pi() AS ${col}_mean, \
+        atan2(${col}_sin_median, ${col}_cos_median) * 180 / pi() AS ${col}_median, \
+        sqrt(-2 * ln(LEAST(GREATEST(coalesce((sqrt(${col}_sin_mean*${col}_sin_mean + ${col}_cos_mean*${col}_cos_mean) / NULLIF(${mag}_mean, 0)), 0.0), 1e-9), 1.0))) AS ${col}_stddev, \
+        sqrt(-2 * ln(LEAST(GREATEST(coalesce((sqrt(${col}_sin_mad*${col}_sin_mad + ${col}_cos_mad*${col}_cos_mad) / NULLIF(${mag}_mad, 0)), 0.0), 1e-9), 1.0))) AS ${col}_mad, \
+        ${col}_sin_n AS ${col}_n"
+    else
+      POST_SELECT="${POST_SELECT}, \
+        atan2(${col}_sin_mean, ${col}_cos_mean) * 180 / pi() AS ${col}_mean, \
+        atan2(${col}_sin_median, ${col}_cos_median) * 180 / pi() AS ${col}_median, \
+        sqrt(-2 * ln(GREATEST(sqrt(${col}_sin_mean*${col}_sin_mean + ${col}_cos_mean*${col}_cos_mean), 1e-9))) AS ${col}_stddev, \
+        sqrt(-2 * ln(GREATEST(sqrt(${col}_sin_mad*${col}_sin_mad + ${col}_cos_mad*${col}_cos_mad), 1e-9))) AS ${col}_mad, \
+        ${col}_sin_n AS ${col}_n"
+    fi
   done
   POST_QUERY="SELECT ${POST_SELECT} FROM ${DB_NAME}.${TMP_OUTPUT_TABLE}"
+  save_sql "03_postprocess_projection" "$POST_QUERY"
   log "Post-processing directional columns"
   # Drop destination table and pre-clean final S3 prefix to avoid CTAS conflicts
   log "Dropping existing final table if present: ${DB_NAME}.${ORIG_OUTPUT_TABLE}"
+  SQL_DROP_FINAL="DROP TABLE IF EXISTS ${DB_NAME}.${ORIG_OUTPUT_TABLE}"
+  save_sql "04_drop_final_table" "$SQL_DROP_FINAL"
   run_aws athena start-query-execution \
-    --query-string "DROP TABLE IF EXISTS ${DB_NAME}.${ORIG_OUTPUT_TABLE}" \
+    --query-string "$SQL_DROP_FINAL" \
     --query-execution-context "Database=${DB_NAME}" \
     --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${ORIG_OUTPUT_PREFIX%/}_athena" \
     --region "$REGION" --profile "$PROFILE" >/dev/null || true
@@ -267,12 +362,18 @@ if [ -n "$DIRECTION_COLS" ]; then
   fi
   aws s3 rm "${FINAL_S3_PATH}" --recursive --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1 || true
 
-  QID=$(run_aws athena start-query-execution --query-string "CREATE TABLE ${DB_NAME}.${ORIG_OUTPUT_TABLE} WITH (format='PARQUET', external_location='s3://${BUCKET_NAME}/${ORIG_OUTPUT_PREFIX}') AS ${POST_QUERY}" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${ORIG_OUTPUT_PREFIX%/}_athena" --region "$REGION" --profile "$PROFILE" --output text --query 'QueryExecutionId')
+  SQL_POST_CTAS="CREATE TABLE ${DB_NAME}.${ORIG_OUTPUT_TABLE} WITH (format='PARQUET', external_location='s3://${BUCKET_NAME}/${ORIG_OUTPUT_PREFIX}') AS ${POST_QUERY}"
+  save_sql "05_create_final_table" "$SQL_POST_CTAS"
+  QID=$(run_aws athena start-query-execution --query-string "$SQL_POST_CTAS" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${ORIG_OUTPUT_PREFIX%/}_athena" --region "$REGION" --profile "$PROFILE" --output text --query 'QueryExecutionId')
   wait_for_query "$QID"
 
   log "Cleaning intermediate tables"
-  run_aws athena start-query-execution --query-string "DROP TABLE IF EXISTS ${DB_NAME}.${TMP_DATA_TABLE}" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TRIG_PREFIX}_athena" --region "$REGION" --profile "$PROFILE" >/dev/null || true
-  run_aws athena start-query-execution --query-string "DROP TABLE IF EXISTS ${DB_NAME}.${TMP_OUTPUT_TABLE}" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TMP_OUTPUT_PREFIX%/}_athena" --region "$REGION" --profile "$PROFILE" >/dev/null || true
+  SQL_DROP_TMP_DATA="DROP TABLE IF EXISTS ${DB_NAME}.${TMP_DATA_TABLE}"
+  SQL_DROP_TMP_OUTPUT="DROP TABLE IF EXISTS ${DB_NAME}.${TMP_OUTPUT_TABLE}"
+  save_sql "06_drop_tmp_trig_table" "$SQL_DROP_TMP_DATA"
+  save_sql "07_drop_tmp_output_table" "$SQL_DROP_TMP_OUTPUT"
+  run_aws athena start-query-execution --query-string "$SQL_DROP_TMP_DATA" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TRIG_PREFIX}_athena" --region "$REGION" --profile "$PROFILE" >/dev/null || true
+  run_aws athena start-query-execution --query-string "$SQL_DROP_TMP_OUTPUT" --query-execution-context "Database=${DB_NAME}" --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${TMP_OUTPUT_PREFIX%/}_athena" --region "$REGION" --profile "$PROFILE" >/dev/null || true
   aws s3 rm "s3://${BUCKET_NAME}/${TRIG_PREFIX}" --recursive --profile "$PROFILE" --region "$REGION" >/dev/null 2>&1 || true
   aws s3 rm "s3://${BUCKET_NAME}/${TMP_OUTPUT_PREFIX}" --recursive --profile "$PROFILE" --region "$REGION" >/dev/null 2>&1 || true
 fi

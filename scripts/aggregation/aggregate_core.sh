@@ -131,9 +131,13 @@ else
 fi
 LOG_DIR="$(realpath "$LOG_DIR")"
 SCRIPT_NAME=$(basename "$0")
-LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}.log"
+SCRIPT_BASE="${SCRIPT_NAME%.*}"
+LOG_FILE="${LOG_DIR}/${SCRIPT_BASE}_${OUTPUT_TABLE}.log"
 rm -f "$LOG_FILE"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "$LOG_FILE"; }
+
+# Prepare SQL file prefix for saving generated queries (overwrite between runs)
+SQL_PREFIX="${LOG_DIR}/${SCRIPT_BASE}_${OUTPUT_TABLE}"
 
 REGION="eu-west-3"
 
@@ -209,14 +213,15 @@ for col in "${COL_ARRAY[@]}"; do
   # Pass through original columns in base
   BASE_COLS+=("d.${col_trim} AS ${col_trim}")
   # Aggregated stats (excluding MAD) computed in agg CTE
-  AGG_STATS+=("avg(b.${col_trim}) AS ${col_trim}_mean")
-  AGG_STATS+=("approx_percentile(b.${col_trim}, 0.5) AS ${col_trim}_median")
-  AGG_STATS+=("stddev(b.${col_trim}) AS ${col_trim}_stddev")
-  AGG_STATS+=("min(b.${col_trim}) AS ${col_trim}_min")
-  AGG_STATS+=("max(b.${col_trim}) AS ${col_trim}_max")
+  # Explicitly ignore NULLs for this column using FILTER clauses
+  AGG_STATS+=("avg(b.${col_trim}) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_mean")
+  AGG_STATS+=("approx_percentile(b.${col_trim}, 0.5) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_median")
+  AGG_STATS+=("stddev(b.${col_trim}) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_stddev")
+  AGG_STATS+=("min(b.${col_trim}) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_min")
+  AGG_STATS+=("max(b.${col_trim}) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_max")
   AGG_STATS+=("count(b.${col_trim}) AS ${col_trim}_n")
   # MAD computed in separate mad CTE using medians from agg
-  MAD_STATS+=("approx_percentile(abs(b.${col_trim} - a.${col_trim}_median), 0.5) AS ${col_trim}_mad")
+  MAD_STATS+=("approx_percentile(abs(b.${col_trim} - a.${col_trim}_median), 0.5) FILTER (WHERE b.${col_trim} IS NOT NULL) AS ${col_trim}_mad")
   # Collect output column names in final SELECT from agg; MADs joined later
   SELECT_OUTPUT+=("a.${col_trim}_mean")
   SELECT_OUTPUT+=("a.${col_trim}_median")
@@ -301,11 +306,18 @@ FROM agg a
 JOIN mad m ON a.${TIMESTAMP_COL} = m.${TIMESTAMP_COL} AND a.node_id = m.node_id AND a.geometry = m.geometry${JOIN_AM_EXTRA}"
 
 CTAS="CREATE TABLE ${DB_NAME}.${OUTPUT_TABLE} WITH (external_location='s3://${BUCKET_NAME}/${OUTPUT_PREFIX}', format='PARQUET'${PARTITION_ARRAY:+, partitioned_by=ARRAY[${PARTITION_ARRAY}]}) AS ${QUERY}"
+DROP_SQL="DROP TABLE IF EXISTS ${DB_NAME}.${OUTPUT_TABLE}"
+
+# Persist SQL to log directory for inspection
+printf "%s\n" "$QUERY" > "${SQL_PREFIX}.query.sql"
+printf "%s\n" "$CTAS" > "${SQL_PREFIX}.ctas.sql"
+printf "%s\n" "$DROP_SQL" > "${SQL_PREFIX}.drop.sql"
+log "Saved SQL files: ${SQL_PREFIX}.{query,ctas,drop}.sql"
  
 # Ensure clean target (drop table and clear target S3 prefix) to avoid CTAS partials
 log "Dropping existing table if present: ${DB_NAME}.${OUTPUT_TABLE}"
 run_aws athena start-query-execution \
-  --query-string "DROP TABLE IF EXISTS ${DB_NAME}.${OUTPUT_TABLE}" \
+  --query-string "$DROP_SQL" \
   --query-execution-context "Database=${DB_NAME}" \
   --result-configuration "OutputLocation=s3://${BUCKET_NAME}/${OUTPUT_PREFIX%/}_athena_results" \
   --region $REGION --profile "$PROFILE" >/dev/null || true

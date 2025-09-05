@@ -102,7 +102,8 @@ else
 fi
 LOG_DIR="$(realpath "$LOG_DIR")"
 SCRIPT_NAME=$(basename "$0")
-LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}.log"
+SCRIPT_BASE="${SCRIPT_NAME%.*}"
+LOG_FILE="${LOG_DIR}/${SCRIPT_BASE}_${OUTPUT_TABLE}.log"
 rm -f "$LOG_FILE"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "$LOG_FILE"; }
 
