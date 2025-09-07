@@ -1,0 +1,5 @@
+streamlit
+pystac
+geopandas
+folium
+pyarrow
