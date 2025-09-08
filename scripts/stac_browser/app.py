@@ -5,6 +5,7 @@ import math
 from datetime import datetime
 import pandas as pd
 import geopandas as gpd
+import importlib.util
 import uuid
 from itertools import islice
 import streamlit as st
@@ -152,7 +153,20 @@ def load_root(path):
 
 @st.cache_data
 def load_asset(href):
-    return gpd.read_parquet(href)
+    # Choose a parquet engine available in the environment
+    engine = None
+    try:
+        if importlib.util.find_spec("pyarrow") is not None:
+            engine = "pyarrow"
+        elif importlib.util.find_spec("fastparquet") is not None:
+            engine = "fastparquet"
+    except Exception:
+        engine = None
+
+    if engine is None:
+        # Let geopandas/pandas try auto-detection (may raise a clear error)
+        return gpd.read_parquet(href)
+    return gpd.read_parquet(href, engine=engine)
 
 
 def resolve_asset_href(asset, item, stac_path):
@@ -360,10 +374,10 @@ def main():
         if st.button("▶", key="items_next", disabled=(not has_next), use_container_width=True):
             st.session_state["items_page_num"] = curr_page + 1
     with nav_cols[2]:
-        st.markdown("Página {}".format(curr_page))
+        st.markdown("Page {}".format(curr_page))
 
     if not items_page:
-        st.sidebar.warning("No hay Items en esta página. Ajusta tamaño o usa Prev.")
+        st.sidebar.warning("No items on this page. Adjust page size or go to previous page.")
         if curr_page > 1:
             st.session_state["items_page_num"] = curr_page - 1
         st.stop()
@@ -383,13 +397,13 @@ def main():
 
     geopq_assets = {k: a for k, a in item.assets.items() if _is_parquet_asset(a)}
     if not geopq_assets:
-        st.warning("Este Item no contiene assets Parquet/GeoParquet.")
+        st.warning("This item does not contain Parquet/GeoParquet assets.")
         st.stop()
 
     asset_key = st.sidebar.selectbox("Asset", list(geopq_assets.keys()))
     asset = geopq_assets.get(asset_key)
     if asset is None:
-        st.warning("No se ha seleccionado ningún asset válido.")
+        st.warning("No valid asset selected.")
         st.stop()
 
     href = resolve_asset_href(asset, item, STAC_PATH)
@@ -418,7 +432,7 @@ def main():
     if time_column:
         # Allow adjusting threshold in UI (defaults to env var)
         time_max_instants_ui = st.sidebar.number_input(
-            "Máx. instantes únicos", min_value=10, max_value=10000,
+            "Max unique instants", min_value=10, max_value=10000,
             value=TIME_MAX_INSTANTS, step=10
         )
         # Show selected column description (if available)
@@ -428,7 +442,7 @@ def main():
                 desc = tmeta.get("description") or ""
                 unit = tmeta.get("unit")
                 extra = " ({})".format(unit) if unit else ""
-                st.sidebar.caption("Tiempo: {}{}".format(desc, extra))
+                st.sidebar.caption("Time: {}{}".format(desc, extra))
         except Exception:
             pass
         # Parse robustly; coerce invalid rows to NaT
@@ -440,7 +454,7 @@ def main():
             pass
         valid_mask = ts.notna()
         if not valid_mask.any():
-            st.sidebar.warning("La columna de tiempo '{}' no tiene valores válidos.".format(time_column))
+            st.sidebar.warning("Time column '{}' has no valid values.".format(time_column))
         else:
             instants = pd.Series(ts[valid_mask]).dropna()
             instants = instants.sort_values().drop_duplicates()
@@ -449,42 +463,42 @@ def main():
                 options = [t.to_pydatetime() if hasattr(t, "to_pydatetime") else t for t in instants]
                 idx = len(options) - 1  # default to the latest
                 chosen_dt = st.sidebar.selectbox(
-                    "Instante", options, index=idx,
+                    "Instant", options, index=idx,
                     format_func=lambda d: d.strftime("%Y-%m-%d %H:%M:%S")
                 )
                 gdf = gdf.loc[valid_mask].copy()
                 gdf = gdf[(ts[valid_mask] == pd.Timestamp(chosen_dt)).values].copy()
                 if gdf.empty:
-                    st.info("No hay datos para el instante seleccionado.")
+                    st.info("No data available for the selected instant.")
                     st.stop()
             else:
                 # Fallback: choose date first, then time available in that date
                 dates = ts.dt.date
                 unique_dates = sorted(pd.Series(dates[valid_mask]).dropna().unique())
                 if not unique_dates:
-                    st.sidebar.warning("No hay fechas válidas para filtrar.")
+                    st.sidebar.warning("No valid dates available for filtering.")
                 else:
                     d_idx = len(unique_dates) - 1
                     chosen_date = st.sidebar.selectbox(
-                        "Fecha", unique_dates, index=d_idx, format_func=lambda d: d.isoformat()
+                        "Date", unique_dates, index=d_idx, format_func=lambda d: d.isoformat()
                     )
                     day_mask = dates[valid_mask] == chosen_date
                     day_instants = pd.Series(ts[valid_mask][day_mask]).dropna().sort_values().drop_duplicates()
                     if len(day_instants) == 0:
-                        st.info("No hay datos para la fecha seleccionada.")
+                        st.info("No data available for the selected date.")
                         st.stop()
                     t_idx = len(day_instants) - 1
                     time_options = [
                         t.to_pydatetime() if hasattr(t, "to_pydatetime") else t for t in day_instants
                     ]
                     chosen_time = st.sidebar.selectbox(
-                        "Hora", time_options, index=t_idx, format_func=lambda d: d.strftime("%H:%M:%S")
+                        "Time", time_options, index=t_idx, format_func=lambda d: d.strftime("%H:%M:%S")
                     )
                     gdf = gdf.loc[valid_mask].copy()
                     final_mask = (ts[valid_mask] == pd.Timestamp(chosen_time)).values
                     gdf = gdf.loc[final_mask].copy()
                     if gdf.empty:
-                        st.info("No hay datos para la hora seleccionada.")
+                        st.info("No data available for the selected time.")
                         st.stop()
 
     # Choose basemap and colormap for scalar/vector
@@ -521,7 +535,7 @@ def main():
         ]
         default_col = SCALAR_COL if (SCALAR_COL and SCALAR_COL in numeric_candidates) else None
         if not numeric_candidates and not default_col:
-            st.warning("No se detectaron columnas numéricas para el mapa escalar.")
+            st.warning("No numeric columns detected for the scalar map.")
         else:
             options = numeric_candidates or [default_col]
             index = options.index(default_col) if default_col in options else 0
@@ -542,7 +556,7 @@ def main():
             except Exception:
                 pass
             max_points = st.sidebar.number_input(
-                "Máx. puntos a dibujar", min_value=500, max_value=200000,
+                "Max points to draw", min_value=500, max_value=200000,
                 value=MAX_POINTS_DEFAULT, step=500
             )
 
@@ -562,7 +576,7 @@ def main():
                     pass
             valid = vals.notna() & pts.notna()
             if not valid.any():
-                st.warning("No hay valores numéricos válidos para el mapa escalar.")
+                st.warning("No valid numeric values found for the scalar map.")
             else:
                 v_all = vals[valid]
                 p_all = pts[valid]
@@ -571,7 +585,7 @@ def main():
                     sample_idx = v_all.sample(int(max_points), random_state=42).index
                     v = v_all.loc[sample_idx]
                     p = p_all.loc[sample_idx]
-                    st.caption("Mostrando {} de {} puntos".format(len(v), len(v_all)))
+                    st.caption("Showing {} of {} points".format(len(v), len(v_all)))
                 else:
                     v, p = v_all, p_all
                 vmin, vmax = float(v.min()), float(v.max())
@@ -598,7 +612,7 @@ def main():
             if c != geom_name and pd.to_numeric(gdf[c], errors="coerce").notna().sum() > 0
         ]
         if not numeric_candidates:
-            st.warning("No se detectaron columnas numéricas para el mapa de viento.")
+            st.warning("No numeric columns detected for the wind map.")
             st.stop()
 
         default_dir = WIND_DIR if (WIND_DIR and WIND_DIR in numeric_candidates) else None
@@ -627,7 +641,7 @@ def main():
                 desc = d_meta.get("description") or ""
                 unit = d_meta.get("unit")
                 extra = " ({})".format(unit) if unit else ""
-                st.sidebar.caption("Dir: {}{}".format(desc, extra))
+                st.sidebar.caption("Direction: {}{}".format(desc, extra))
         except Exception:
             pass
         try:
@@ -636,7 +650,7 @@ def main():
                 desc = s_meta.get("description") or ""
                 unit = s_meta.get("unit")
                 extra = " ({})".format(unit) if unit else ""
-                st.sidebar.caption("Vel: {}{}".format(desc, extra))
+                st.sidebar.caption("Speed: {}{}".format(desc, extra))
         except Exception:
             pass
 
@@ -655,10 +669,10 @@ def main():
                 pass
         valid = dir_vals.notna() & spd_vals.notna() & pts.notna()
         if not valid.any():
-            st.warning("No hay datos válidos para el mapa de viento.")
+            st.warning("No valid data found for the wind map.")
         else:
             max_vectors = st.sidebar.number_input(
-                "Máx. vectores a dibujar", min_value=500, max_value=200000,
+                "Max vectors to draw", min_value=500, max_value=200000,
                 value=MAX_POINTS_DEFAULT, step=500
             )
             # Color by speed like scalar
@@ -670,7 +684,7 @@ def main():
                 v = v_all.loc[sample_idx]
                 p = p_all.loc[sample_idx]
                 dir_vals = dir_vals.loc[sample_idx]
-                st.caption("Mostrando {} de {} vectores".format(len(v), len(v_all)))
+                st.caption("Showing {} of {} vectors".format(len(v), len(v_all)))
             else:
                 v, p = v_all, p_all
             vmin, vmax = float(v.min()), float(v.max())
@@ -732,7 +746,7 @@ def main():
             except Exception:
                 continue
         if not points:
-            st.warning("No se pudieron derivar puntos para el mapa de densidad.")
+            st.warning("No points could be derived for the density map.")
         else:
             HeatMap(points).add_to(m)
             # Fit bounds using geometry points
