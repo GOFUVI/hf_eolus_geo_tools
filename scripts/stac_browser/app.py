@@ -6,6 +6,9 @@ from datetime import datetime
 import pandas as pd
 import geopandas as gpd
 import importlib.util
+from typing import Optional
+import shapely
+from shapely import wkb as _shp_wkb, wkt as _shp_wkt
 import uuid
 from itertools import islice
 import streamlit as st
@@ -153,20 +156,117 @@ def load_root(path):
 
 @st.cache_data
 def load_asset(href):
-    # Choose a parquet engine available in the environment
-    engine = None
-    try:
-        if importlib.util.find_spec("pyarrow") is not None:
-            engine = "pyarrow"
-        elif importlib.util.find_spec("fastparquet") is not None:
-            engine = "fastparquet"
-    except Exception:
-        engine = None
+    """Load a GeoParquet using GeoPandas; fall back to fastparquet if pyarrow missing.
 
-    if engine is None:
-        # Let geopandas/pandas try auto-detection (may raise a clear error)
+    GeoPandas' reader expects pyarrow and does not support an `engine` kwarg.
+    On platforms without pyarrow (e.g., arm/v7), we fall back to pandas+fastparquet
+    and reconstruct geometry from WKB/WKT if present.
+    """
+    try:
         return gpd.read_parquet(href)
-    return gpd.read_parquet(href, engine=engine)
+    except Exception:
+        # Try fallback only if fastparquet is available
+        try:
+            if importlib.util.find_spec("fastparquet") is None:
+                raise
+        except Exception:
+            # Re-raise original behavior if we cannot detect fastparquet
+            raise
+        return _read_geoparquet_via_fastparquet(href)
+
+
+def _detect_geometry_column(df) -> Optional[tuple[str, str]]:
+    """Detect geometry column and format.
+
+    Returns (column_name, format), where format is 'wkb' or 'wkt'.
+    """
+    try:
+        cols = list(df.columns)
+    except Exception:
+        return None
+
+    # Helper to test a sample value
+    def _is_wkb_sample(x) -> bool:
+        try:
+            if not isinstance(x, (bytes, bytearray)):
+                return False
+            # Try parsing first sample
+            _ = _shp_wkb.loads(x)
+            return True
+        except Exception:
+            return False
+
+    def _is_wkt_sample(x) -> bool:
+        try:
+            if not isinstance(x, str):
+                return False
+            s = x.strip().upper()
+            if not s:
+                return False
+            if not (s.startswith("POINT") or s.startswith("LINESTRING") or s.startswith("POLYGON")
+                    or s.startswith("MULTI") or s.startswith("GEOMETRY")):
+                return False
+            _ = _shp_wkt.loads(x)
+            return True
+        except Exception:
+            return False
+
+    candidates = []
+    for c in cols:
+        try:
+            s = df[c].dropna()
+            if s.empty:
+                continue
+            v = s.iloc[0]
+            if _is_wkb_sample(v):
+                candidates.append((c, "wkb"))
+            elif _is_wkt_sample(v):
+                candidates.append((c, "wkt"))
+        except Exception:
+            continue
+
+    # Prefer a column explicitly named 'geometry'
+    for c, fmt in candidates:
+        if c.lower() == "geometry":
+            return c, fmt
+    return candidates[0] if candidates else None
+
+
+def _series_from_wkb(series):
+    try:
+        from shapely import from_wkb as _from_wkb
+        return _from_wkb(series)
+    except Exception:
+        return series.apply(lambda b: _shp_wkb.loads(b) if isinstance(b, (bytes, bytearray)) else None)
+
+
+def _series_from_wkt(series):
+    try:
+        from shapely import from_wkt as _from_wkt
+        return _from_wkt(series)
+    except Exception:
+        return series.apply(lambda s: _shp_wkt.loads(s) if isinstance(s, str) and s.strip() else None)
+
+
+def _read_geoparquet_via_fastparquet(path):
+    import pandas as _pd
+
+    df = _pd.read_parquet(path, engine="fastparquet")
+    detected = _detect_geometry_column(df)
+    if not detected:
+        # No obvious geometry found; return a plain GeoDataFrame without geometry
+        return gpd.GeoDataFrame(df)
+
+    geom_col, fmt = detected
+    if fmt == "wkb":
+        geom_series = _series_from_wkb(df[geom_col])
+    else:
+        geom_series = _series_from_wkt(df[geom_col])
+
+    # Drop source geometry column if present and construct GeoDataFrame
+    data = df.drop(columns=[geom_col]) if geom_col in df.columns else df
+    # Default to EPSG:4326 if CRS not discoverable in this fallback path
+    return gpd.GeoDataFrame(data, geometry=geom_series, crs="EPSG:4326")
 
 
 def resolve_asset_href(asset, item, stac_path):

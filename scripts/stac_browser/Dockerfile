@@ -34,7 +34,7 @@ RUN pip install --prefer-binary -r /tmp/requirements.txt \
 
 # Try to add a Parquet engine on armhf: prefer pyarrow, else fall back to fastparquet
 RUN if [ "$(dpkg --print-architecture)" = "armhf" ]; then \
-      pip install --prefer-binary pyarrow || pip install --prefer-binary fastparquet || true; \
+      pip install --prefer-binary pyarrow || pip install --prefer-binary fastparquet; \
     fi
 
 COPY app.py /app/app.py
