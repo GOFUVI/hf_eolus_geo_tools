@@ -4,9 +4,35 @@ WORKDIR /app
 
 # Install dependencies
 COPY requirements.txt /tmp/requirements.txt
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && rm -rf /var/lib/apt/lists/* /tmp/requirements.txt
+ARG TARGETPLATFORM
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Configure piwheels for Raspberry Pi (arm/v7) to get prebuilt wheels
+RUN if [ "$TARGETPLATFORM" = "linux/arm/v7" ] || [ "$(dpkg --print-architecture)" = "armhf" ]; then \
+      printf "[global]\nindex-url = https://www.piwheels.org/simple\nextra-index-url = https://pypi.org/simple\n" > /etc/pip.conf; \
+    fi
+
+# System libs needed by geopandas/shapely/fiona/pyproj (and friends)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        gdal-bin libgdal-dev \
+        libgeos-dev \
+        proj-bin libproj-dev \
+        libspatialindex-dev \
+    && if [ "$(dpkg --print-architecture)" = "armhf" ]; then \
+         apt-get install -y --no-install-recommends python3-pyarrow; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prefer wheels to avoid source builds on non-amd64
+ENV PIP_NO_CACHE_DIR=1
+# On armhf, prefer system pyarrow and avoid attempting to build from source
+RUN if [ "$(dpkg --print-architecture)" = "armhf" ]; then \
+      grep -v '^pyarrow\b' /tmp/requirements.txt > /tmp/requirements-no-arrow.txt && mv /tmp/requirements-no-arrow.txt /tmp/requirements.txt; \
+    fi \
+    && pip install --prefer-binary -r /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt
 
 COPY app.py /app/app.py
 

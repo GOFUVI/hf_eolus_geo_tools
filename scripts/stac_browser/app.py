@@ -13,6 +13,7 @@ from folium.plugins import HeatMap
 from pystac import Catalog, Collection
 from pystac.utils import make_absolute_href
 import branca.colormap as bcm
+import html
 
 # Environment configuration
 STAC_PATH = os.environ.get("STAC_PATH", "/data/catalog.json")
@@ -20,6 +21,8 @@ WIND_DIR = os.environ.get("WIND_DIRECTION_COLUMN")
 WIND_SPEED = os.environ.get("WIND_SPEED_COLUMN")
 SCALAR_COL = os.environ.get("SCALAR_COLUMN")
 TIME_COL = os.environ.get("TIME_COLUMN")
+# Comma-separated list of potential time columns (higher priority than auto-detect)
+TIME_COLS_ENV = os.environ.get("TIME_COLUMNS")
 # Max unique instants to show directly in a dropdown before falling back to date->time selection
 try:
     TIME_MAX_INSTANTS = int(os.environ.get("TIME_MAX_INSTANTS", "200"))
@@ -178,6 +181,130 @@ def resolve_asset_href(asset, item, stac_path):
     base_dir = stac_path if os.path.isdir(stac_path) else os.path.dirname(stac_path)
     return os.path.normpath(os.path.join(base_dir, href))
 
+
+def _extract_table_columns_meta(collection, item, asset_key, asset):
+    """
+    Return a mapping: column_name -> metadata dict from STAC Table extension.
+
+    Looks for `table:columns` primarily on the selected Asset. Falls back to:
+    - Item properties (non-standard, but seen in the wild)
+    - Collection `item_assets[asset_key]` definition (via Item Assets extension)
+    """
+    meta = {}
+
+    def _parse_columns(cols):
+        result = {}
+        try:
+            for c in cols or []:
+                try:
+                    name = c.get("name") or c.get("column")
+                except Exception:
+                    name = None
+                if not name:
+                    continue
+                result[name] = {
+                    "description": c.get("description") or c.get("descr") or c.get("title"),
+                    "type": c.get("type"),
+                    "unit": c.get("unit") or c.get("units"),
+                }
+        except Exception:
+            pass
+        return result
+
+    # 1) Asset extra fields
+    try:
+        cols = None
+        if hasattr(asset, "extra_fields") and isinstance(asset.extra_fields, dict):
+            cols = asset.extra_fields.get("table:columns") or asset.extra_fields.get("table_columns")
+        if not cols:
+            # Try full dict in case extension fields were flattened differently
+            ad = None
+            try:
+                ad = asset.to_dict()  # type: ignore[attr-defined]
+            except Exception:
+                ad = None
+            if isinstance(ad, dict):
+                cols = ad.get("table:columns") or ad.get("table_columns")
+        meta.update(_parse_columns(cols))
+    except Exception:
+        pass
+
+    # 2) Item-level (non-standard, fallback only)
+    try:
+        props = getattr(item, "properties", {}) or {}
+        if isinstance(props, dict):
+            meta.update(_parse_columns(props.get("table:columns") or props.get("table_columns")))
+    except Exception:
+        pass
+
+    # 3) Collection item_assets definition
+    try:
+        extra = getattr(collection, "extra_fields", {}) or {}
+        if isinstance(extra, dict):
+            item_assets = extra.get("item_assets") or {}
+            if isinstance(item_assets, dict):
+                asset_def = item_assets.get(asset_key) or {}
+                if isinstance(asset_def, dict):
+                    meta.update(_parse_columns(asset_def.get("table:columns") or asset_def.get("table_columns")))
+    except Exception:
+        pass
+
+    return meta
+
+
+def _format_column_option(col_name, col_meta):
+    """Display label for column select options, including description if present."""
+    m = col_meta.get(col_name) if isinstance(col_meta, dict) else None
+    desc = (m or {}).get("description")
+    if desc:
+        return "{} — {}".format(col_name, desc)
+    return col_name
+
+
+def _legend_label(col_name, col_meta):
+    m = col_meta.get(col_name) if isinstance(col_meta, dict) else None
+    desc = (m or {}).get("description")
+    unit = (m or {}).get("unit")
+    pieces = [col_name]
+    if desc:
+        pieces.append(desc)
+    if unit:
+        pieces.append("[{}]".format(unit))
+    # Escape HTML to avoid breaking legend
+    txt = " — ".join(pieces)
+    return html.escape(txt)
+
+
+def _dedupe_preserve(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _auto_detect_time_columns(gdf, col_meta):
+    """Return candidate time columns without heuristics.
+
+    Only uses environment variables:
+    - `TIME_COLUMN`
+    - `TIME_COLUMNS` (comma/semicolon/space separated)
+    Filters to columns present in `gdf` and preserves provided order.
+    """
+    candidates = []
+    if TIME_COL:
+        candidates.append(TIME_COL)
+    if TIME_COLS_ENV:
+        parts = re.split(r"[;,\s]+", TIME_COLS_ENV.strip())
+        candidates.extend([p for p in parts if p])
+
+    # Keep those present in gdf and de-dupe
+    candidates = [c for c in candidates if c in gdf.columns]
+    return _dedupe_preserve(candidates)
+
 def main():
     st.title("STAC Geoparquet Browser")
 
@@ -268,14 +395,42 @@ def main():
     href = resolve_asset_href(asset, item, STAC_PATH)
     gdf = load_asset(href)
 
-    # Time filtering
-    time_column = TIME_COL if (TIME_COL and TIME_COL in gdf.columns) else None
+    # Column metadata from STAC Table extension (if available)
+    col_meta = _extract_table_columns_meta(collection, item, asset_key, asset)
+
+    # Time filtering (supports multiple possible columns)
+    # Column metadata from STAC Table extension (if available)
+    # NOTE: `col_meta` computed above
+    time_candidates = _auto_detect_time_columns(gdf, col_meta)
+    time_column = None
+    if time_candidates:
+        # Prefer explicit TIME_COLUMN if present among candidates, else first
+        default_idx = 0
+        if TIME_COL and TIME_COL in time_candidates:
+            default_idx = time_candidates.index(TIME_COL)
+        time_column = st.sidebar.selectbox(
+            "Time column",
+            time_candidates,
+            index=default_idx,
+            format_func=lambda c: _format_column_option(c, col_meta),
+        )
+
     if time_column:
         # Allow adjusting threshold in UI (defaults to env var)
         time_max_instants_ui = st.sidebar.number_input(
             "Máx. instantes únicos", min_value=10, max_value=10000,
             value=TIME_MAX_INSTANTS, step=10
         )
+        # Show selected column description (if available)
+        try:
+            tmeta = col_meta.get(time_column, {}) if isinstance(col_meta, dict) else {}
+            if tmeta.get("description") or tmeta.get("unit"):
+                desc = tmeta.get("description") or ""
+                unit = tmeta.get("unit")
+                extra = " ({})".format(unit) if unit else ""
+                st.sidebar.caption("Tiempo: {}{}".format(desc, extra))
+        except Exception:
+            pass
         # Parse robustly; coerce invalid rows to NaT
         ts = pd.to_datetime(gdf[time_column], errors="coerce", utc=False)
         # Remove timezone for Streamlit widget compatibility
@@ -370,7 +525,22 @@ def main():
         else:
             options = numeric_candidates or [default_col]
             index = options.index(default_col) if default_col in options else 0
-            column = st.sidebar.selectbox("Scalar column", options, index=index)
+            column = st.sidebar.selectbox(
+                "Scalar column",
+                options,
+                index=index,
+                format_func=lambda c: _format_column_option(c, col_meta),
+            )
+            # Show selected column description (if available)
+            try:
+                sel_meta = col_meta.get(column, {})
+                if sel_meta.get("description") or sel_meta.get("unit"):
+                    desc = sel_meta.get("description") or ""
+                    unit = sel_meta.get("unit")
+                    extra = " ({})".format(unit) if unit else ""
+                    st.sidebar.caption("{}{}".format(desc, extra))
+            except Exception:
+                pass
             max_points = st.sidebar.number_input(
                 "Máx. puntos a dibujar", min_value=500, max_value=200000,
                 value=MAX_POINTS_DEFAULT, step=500
@@ -418,7 +588,7 @@ def main():
                     popup="{}: {}".format(column, value)
                     ).add_to(m)
                 # Add colorbar legend
-                add_color_legend(m, cm, vmin, vmax, column, is_dark=is_dark_basemap)
+                add_color_legend(m, cm, vmin, vmax, _legend_label(column, col_meta), is_dark=is_dark_basemap)
                 _fit_bounds_from_geoms(m, p)
     elif map_type == "vector":
         # Limit to numeric-like columns (excluding geometry)
@@ -437,8 +607,38 @@ def main():
         dir_index = numeric_candidates.index(default_dir) if default_dir in numeric_candidates else 0
         spd_index = numeric_candidates.index(default_spd) if default_spd in numeric_candidates else 0
 
-        dir_col = st.sidebar.selectbox("Direction column", numeric_candidates, index=dir_index)
-        spd_col = st.sidebar.selectbox("Speed column", numeric_candidates, index=spd_index)
+        dir_col = st.sidebar.selectbox(
+            "Direction column",
+            numeric_candidates,
+            index=dir_index,
+            format_func=lambda c: _format_column_option(c, col_meta),
+        )
+        spd_col = st.sidebar.selectbox(
+            "Speed column",
+            numeric_candidates,
+            index=spd_index,
+            format_func=lambda c: _format_column_option(c, col_meta),
+        )
+
+        # Column descriptions
+        try:
+            d_meta = col_meta.get(dir_col, {})
+            if d_meta.get("description") or d_meta.get("unit"):
+                desc = d_meta.get("description") or ""
+                unit = d_meta.get("unit")
+                extra = " ({})".format(unit) if unit else ""
+                st.sidebar.caption("Dir: {}{}".format(desc, extra))
+        except Exception:
+            pass
+        try:
+            s_meta = col_meta.get(spd_col, {})
+            if s_meta.get("description") or s_meta.get("unit"):
+                desc = s_meta.get("description") or ""
+                unit = s_meta.get("unit")
+                extra = " ({})".format(unit) if unit else ""
+                st.sidebar.caption("Vel: {}{}".format(desc, extra))
+        except Exception:
+            pass
 
         dir_vals = pd.to_numeric(gdf[dir_col], errors="coerce")
         spd_vals = pd.to_numeric(gdf[spd_col], errors="coerce")
@@ -511,7 +711,7 @@ def main():
                     hpt = (end[0] - hy, end[1] - hx)
                     folium.PolyLine([end, hpt], color=arrow_color, weight=2, opacity=arrow_opacity).add_to(m)
             # Add colorbar legend for speed
-            add_color_legend(m, cm, vmin, vmax, spd_col, is_dark=is_dark_basemap)
+            add_color_legend(m, cm, vmin, vmax, _legend_label(spd_col, col_meta), is_dark=is_dark_basemap)
             _fit_bounds_from_geoms(m, pts[valid])
     else:  # density
         geom = gdf.geometry
