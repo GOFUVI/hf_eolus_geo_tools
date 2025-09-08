@@ -135,3 +135,30 @@ python scripts/grids/create_grid_table.py \
 - Temporary files are created locally and removed after upload, but failed runs
   may leave behind `grid_nodes_*.parquet` files that can be cleaned manually.
 
+## Visualizing the grid
+
+You can preview the generated grid points in an interactive HTML map using the
+Dockerized helper script:
+
+```bash
+# Clustered markers (default) with auto-zoom to extent
+./scripts/grids/view_grid.sh \
+  --input path/to/grid_nodes.parquet \
+  --output grid_map.html \
+  --tiles "OpenStreetMap" \
+  --title "Grid Preview"
+
+# Disable clustering and draw small circle markers
+./scripts/grids/view_grid.sh \
+  --input path/to/grid_nodes.parquet \
+  --no-cluster --marker-size 3
+
+# For very dense grids, limit the number of points rendered
+./scripts/grids/view_grid.sh \
+  --input path/to/grid_nodes.parquet \
+  --sample 5000
+```
+
+Open `grid_map.html` to inspect the nodes. The script reads `node_id` and
+`geometry` (WKB) from the GeoParquet file and fits the map view to the grid
+extent.

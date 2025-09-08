@@ -14,7 +14,7 @@ from itertools import islice
 import streamlit as st
 import folium
 from folium.plugins import HeatMap
-from pystac import Catalog, Collection
+from pystac import Catalog, Collection, Item
 from pystac.utils import make_absolute_href
 import branca.colormap as bcm
 import html
@@ -65,6 +65,20 @@ def get_colormap_by_name(name):
         pass
     # Fallback to YlOrRd then viridis
     return getattr(bcm.linear, "YlOrRd_09", bcm.linear.viridis)
+
+
+def _rerun():
+    """Compat helper for Streamlit rerun across versions."""
+    try:
+        # Newer Streamlit
+        st.rerun()
+    except Exception:
+        try:
+            # Older Streamlit
+            st.experimental_rerun()  # type: ignore[attr-defined]
+        except Exception:
+            # Last resort: toggle a nonce in session state
+            st.session_state["_force_rerun_nonce"] = st.session_state.get("_force_rerun_nonce", 0) + 1
 
 
 def _fit_bounds_from_geoms(m, geoms):
@@ -153,6 +167,51 @@ def load_root(path):
         return Catalog.from_file(resolved)
     except Exception:
         return Collection.from_file(resolved)
+
+def try_load_root(path):
+    """Try to load a STAC root from a path or directory; return None if not loadable."""
+    try:
+        return load_root(path)
+    except Exception:
+        return None
+
+def _dir_has_stac(path):
+    try:
+        return os.path.exists(os.path.join(path, "catalog.json")) or os.path.exists(os.path.join(path, "collection.json"))
+    except Exception:
+        return False
+
+def _normalize_start_path(p: str) -> str:
+    # If a file is provided, browse starting from its directory
+    try:
+        return p if os.path.isdir(p) else os.path.dirname(p)
+    except Exception:
+        return p
+
+
+def try_load_items_from_dir(path):
+    """Return a list of STAC Items if the directory contains item JSONs.
+
+    Non-recursive. Ignores files that are not valid STAC Items.
+    """
+    items = []
+    try:
+        if not os.path.isdir(path):
+            return items
+        for name in sorted(os.listdir(path)):
+            if not name.lower().endswith(".json"):
+                continue
+            fp = os.path.join(path, name)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                it = Item.from_file(fp)
+                items.append(it)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return items
 
 @st.cache_data
 def load_asset(href):
@@ -422,24 +481,183 @@ def _auto_detect_time_columns(gdf, col_meta):
 def main():
     st.title("STAC Geoparquet Browser")
 
-    root = load_root(STAC_PATH)
-    # If the root is a Catalog, list immediate child collections to avoid deep traversal; if it is a
-    # Collection, use it directly.
-    if isinstance(root, Collection):
-        collections = [root]
-    else:  # Catalog
-        try:
-            children = list(root.get_children())
-            collections = [c for c in children if isinstance(c, Collection)]
-            # Fallback: if none found, try all collections (may be slow)
-            if not collections:
-                collections = list(root.get_all_collections())
-        except Exception:
-            collections = list(root.get_all_collections())
+    # Selectable STAC path in session (can be a file or a directory)
+    if "stac_selected_path" not in st.session_state:
+        st.session_state["stac_selected_path"] = STAC_PATH
+    if "browse_mode" not in st.session_state:
+        st.session_state["browse_mode"] = False
 
-    collection = st.sidebar.selectbox(
-        "Collection", collections, format_func=lambda c: c.id
-    )
+    selected_path = st.session_state["stac_selected_path"]
+    root = try_load_root(selected_path)
+
+    # If not a STAC directory/file, or explicitly browsing, let the user pick a folder
+    if (st.session_state.get("browse_mode") or (root is None)):
+        base_dir = _normalize_start_path(selected_path)
+        # Ensure browse mode is active if root isn't loadable
+        if root is None:
+            st.session_state["browse_mode"] = True
+        st.sidebar.subheader("Select STAC Folder")
+
+        if "fs_cwd" not in st.session_state:
+            st.session_state["fs_cwd"] = base_dir
+
+        # Ensure cwd stays under base_dir
+        def _is_under(base, path):
+            try:
+                base = os.path.abspath(base)
+                path = os.path.abspath(path)
+                return os.path.commonpath([base, path]) == base
+            except Exception:
+                return False
+
+        cwd = st.session_state["fs_cwd"]
+        if not _is_under(base_dir, cwd):
+            cwd = base_dir
+            st.session_state["fs_cwd"] = cwd
+
+        st.sidebar.caption("Browsing: {}".format(cwd))
+        cols = st.sidebar.columns([1, 1, 1])
+        with cols[0]:
+            if st.button("⬆ Up", use_container_width=True, disabled=(os.path.abspath(cwd) == os.path.abspath(base_dir))):
+                parent = os.path.dirname(cwd)
+                if _is_under(base_dir, parent):
+                    st.session_state["fs_cwd"] = parent
+                    _rerun()
+        with cols[1]:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state["browse_mode"] = False
+                _rerun()
+        with cols[2]:
+            pass
+
+        # List subdirectories to navigate
+        try:
+            entries = sorted([d for d in os.listdir(cwd) if os.path.isdir(os.path.join(cwd, d))])
+        except Exception:
+            entries = []
+        options = [".. (parent)"] + entries
+        choice = st.sidebar.selectbox("Subfolders", options)
+        if choice:
+            if choice == ".. (parent)":
+                pass  # up handled by button
+            else:
+                new_cwd = os.path.join(cwd, choice)
+                if _is_under(base_dir, new_cwd):
+                    st.session_state["fs_cwd"] = new_cwd
+                    _rerun()
+
+        # Offer to open STAC if current folder has catalog.json/collection.json
+        if _dir_has_stac(cwd):
+            if st.sidebar.button("Open STAC here", type="primary"):
+                st.session_state["stac_selected_path"] = cwd
+                st.session_state["browse_mode"] = False
+                st.session_state.pop("stac_nav_stack", None)
+                _rerun()
+
+        st.info("Select a folder that contains catalog.json or collection.json to browse the STAC.")
+        st.stop()
+
+    # Expose a small control to change or explore the root path
+    with st.sidebar.expander("STAC Source", expanded=False):
+        st.caption("Current: {}".format(selected_path))
+        new_path = st.text_input("STAC path (file or directory)", value=selected_path)
+        c1, c2 = st.sidebar.columns([1, 1])
+        with c1:
+            if st.button("Reload"):
+                st.session_state["stac_selected_path"] = new_path
+                st.session_state.pop("stac_nav_stack", None)
+                _rerun()
+        with c2:
+            if st.button("Browse folders"):
+                st.session_state["stac_selected_path"] = new_path
+                st.session_state["fs_cwd"] = _normalize_start_path(new_path)
+                st.session_state["browse_mode"] = True
+                _rerun()
+
+    # Hierarchical STAC navigation down to collections
+    selected_collection = None
+    items_from_catalog_level = False
+
+    if isinstance(root, Collection):
+        selected_collection = root
+    else:
+        # Initialize navigator stack with root catalog href
+        if "stac_nav_stack" not in st.session_state:
+            try:
+                root_href = root.get_self_href() or selected_path
+            except Exception:
+                root_href = selected_path
+            st.session_state["stac_nav_stack"] = [root_href]
+
+        nav_stack = st.session_state.get("stac_nav_stack", [])
+        curr_href = nav_stack[-1]
+        try:
+            curr_catalog = Catalog.from_file(curr_href)
+        except Exception:
+            curr_catalog = root
+            nav_stack = [root.get_self_href() or selected_path]
+            st.session_state["stac_nav_stack"] = nav_stack
+
+        # Breadcrumbs
+        try:
+            crumb_ids = []
+            for href in nav_stack:
+                try:
+                    c = Catalog.from_file(href)
+                    crumb_ids.append(c.id)
+                except Exception:
+                    crumb_ids.append(os.path.basename(href))
+            st.sidebar.caption("Path: " + " / ".join(crumb_ids))
+        except Exception:
+            pass
+
+        # Back to parent catalog
+        if len(nav_stack) > 1 and st.sidebar.button("⬅ Back to parent catalog"):
+            st.session_state["stac_nav_stack"] = nav_stack[:-1]
+            _rerun()
+
+        # Immediate subcatalogs and collections
+        try:
+            subcats = list(curr_catalog.get_children())
+        except Exception:
+            subcats = []
+        try:
+            level_colls = list(curr_catalog.get_collections())
+        except Exception:
+            level_colls = []
+
+        if subcats:
+            sub_choice = st.sidebar.selectbox("Subcatalog", subcats, format_func=lambda c: getattr(c, "id", "(unnamed)"))
+            if st.sidebar.button("Enter subcatalog"):
+                href = sub_choice.get_self_href() or make_absolute_href("catalog.json", curr_href)
+                st.session_state["stac_nav_stack"].append(href)
+                _rerun()
+
+        if level_colls:
+            selected_collection = st.sidebar.selectbox("Collection", level_colls, format_func=lambda c: c.id)
+        else:
+            with st.sidebar.expander("Descendant collections", expanded=False):
+                try:
+                    all_colls = list(root.get_all_collections())
+                except Exception:
+                    all_colls = []
+                if all_colls:
+                    selected_collection = st.selectbox("Collection", all_colls, format_func=lambda c: c.id)
+                else:
+                    # No collections anywhere; see if there are items at this catalog level
+                    try:
+                        peek = list(islice(curr_catalog.get_items(), 1))
+                    except Exception:
+                        peek = []
+                    if peek:
+                        st.sidebar.info("This catalog has Items directly. Showing Items without a collection.")
+                        items_from_catalog_level = True
+                    else:
+                        st.caption("No collections at this level.")
+
+    # Determine the source of items to paginate: from a selected collection, or from the
+    # current catalog level if it contains items directly
+    collection = selected_collection
 
     # Paginated items to avoid loading all at once
     if "items_page_num" not in st.session_state:
@@ -458,10 +676,20 @@ def main():
 
     start = (curr_page - 1) * int(page_size)
     end = start + int(page_size)
-    try:
-        items_iter = collection.get_items()
-    except Exception:
-        items_iter = collection.get_all_items()
+    if collection is not None:
+        try:
+            items_iter = collection.get_items()
+        except Exception:
+            items_iter = collection.get_all_items()
+    else:
+        if items_from_catalog_level:
+            try:
+                items_iter = curr_catalog.get_items()
+            except Exception:
+                items_iter = curr_catalog.get_all_items()
+        else:
+            st.warning("No collection selected.")
+            st.stop()
     buf = list(islice(items_iter, start, end + 1))
     items_page = buf[: int(page_size)]
     has_next = len(buf) > int(page_size)
@@ -506,7 +734,7 @@ def main():
         st.warning("No valid asset selected.")
         st.stop()
 
-    href = resolve_asset_href(asset, item, STAC_PATH)
+    href = resolve_asset_href(asset, item, selected_path)
     gdf = load_asset(href)
 
     # Column metadata from STAC Table extension (if available)

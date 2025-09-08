@@ -72,3 +72,19 @@ item can be `TABLE` (uses `--database`) or `DATABASE.TABLE`.
 2. Convex hulls are computed with Shapely inside a temporary Python container.
 3. The resulting GeoJSON follows the standard RFC 7946 specification and can be
    used with common GIS tools.
+
+## Visualizing the hull
+
+An interactive HTML map can be generated from the resulting GeoJSON using a
+Dockerized helper script:
+
+```bash
+# Render a map that auto-zooms to the hull extent
+./scripts/hulls/view_hull.sh \
+  --input path/to/hull.geojson \
+  --output hull_map.html \
+  --tiles "OpenStreetMap" \
+  --title "Hull Preview"
+```
+
+Open `hull_map.html` in a browser to inspect the hull geometry.
