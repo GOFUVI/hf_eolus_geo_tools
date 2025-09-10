@@ -18,6 +18,7 @@ from pystac import Catalog, Collection, Item
 from pystac.utils import make_absolute_href
 import branca.colormap as bcm
 import html
+import json
 
 # Environment configuration
 STAC_PATH = os.environ.get("STAC_PATH", "/data/catalog.json")
@@ -45,6 +46,7 @@ st.set_page_config(page_title="STAC Geoparquet Browser", layout="wide")
 
 # Default colormap name (bright on dark background)
 DEFAULT_COLORMAP_NAME = os.environ.get("COLORMAP", "YlOrRd")
+DEBUG_MODE = str(os.environ.get("STAC_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def get_colormap_by_name(name):
@@ -189,6 +191,32 @@ def _normalize_start_path(p: str) -> str:
         return p
 
 
+def _get_rel_href(obj, rel: str, default_base: Optional[str] = None) -> Optional[str]:
+    """Return absolute href for a given rel from a STAC object if present."""
+    try:
+        base = getattr(obj, "get_self_href", lambda: None)() or default_base
+        for lk in getattr(obj, "links", []) or []:
+            try:
+                if lk.rel != rel:
+                    continue
+                # Link may have absolute target
+                abs_href = None
+                try:
+                    abs_href = lk.get_absolute_href()  # type: ignore[attr-defined]
+                except Exception:
+                    abs_href = None
+                if abs_href:
+                    return abs_href
+                href = getattr(lk, "target", None) or getattr(lk, "href", None)
+                if href and base:
+                    return make_absolute_href(str(href), str(base))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def try_load_items_from_dir(path):
     """Return a list of STAC Items if the directory contains item JSONs.
 
@@ -213,25 +241,83 @@ def try_load_items_from_dir(path):
         pass
     return items
 
+
+def find_loose_item_hrefs_near(href_or_dir: str) -> list[str]:
+    """Best-effort discovery of item JSON files under an `items/` folder next to a catalog/collection.
+
+    - Starts at the directory containing `href_or_dir` (if it's a file), else the directory itself.
+    - Looks for `items/` and scans recursively for `*.json` that parse as STAC Items.
+    - Returns a list of absolute paths to candidate item JSON files.
+    """
+    try:
+        base = href_or_dir
+        if os.path.isfile(base):
+            base = os.path.dirname(base)
+        items_root = os.path.join(base, "items")
+        if not os.path.isdir(items_root):
+            return []
+        hrefs: list[str] = []
+        for root_dir, _dirs, files in os.walk(items_root):
+            for fn in files:
+                if not fn.lower().endswith(".json"):
+                    continue
+                fp = os.path.join(root_dir, fn)
+                # Probe quickly whether it is an Item
+                try:
+                    _ = Item.from_file(fp)
+                    hrefs.append(fp)
+                except Exception:
+                    continue
+        hrefs.sort()
+        return hrefs
+    except Exception:
+        return []
+
 @st.cache_data
 def load_asset(href):
-    """Load a GeoParquet using GeoPandas; fall back to fastparquet if pyarrow missing.
+    """Load a GeoParquet robustly, avoiding PyArrow dataset partition collisions.
 
-    GeoPandas' reader expects pyarrow and does not support an `engine` kwarg.
-    On platforms without pyarrow (e.g., arm/v7), we fall back to pandas+fastparquet
-    and reconstruct geometry from WKB/WKT if present.
+    Preferred path:
+    1) Try GeoPandas with `use_legacy_dataset=True` to force single-file reads (prevents
+       synthetic partition columns from folder names like `pos_bragg=0/`).
+    2) If that fails, try GeoPandas default reader.
+    3) If still failing (e.g., due to dataset merge/type issues), read via PyArrow
+       single-file and reconstruct geometry from WKB/WKT if present.
+    4) As a last resort (e.g., PyArrow absent on some platforms), fall back to
+       pandas+fastparquet and reconstruct geometry.
     """
+    # 1) GeoPandas with legacy dataset (if supported)
+    try:
+        return gpd.read_parquet(href, use_legacy_dataset=True)  # type: ignore[call-arg]
+    except TypeError:
+        # Older GeoPandas/Pandas may not accept this kwarg
+        pass
+    except Exception:
+        # Continue to next strategy
+        pass
+
+    # 2) GeoPandas default
     try:
         return gpd.read_parquet(href)
     except Exception:
-        # Try fallback only if fastparquet is available
-        try:
-            if importlib.util.find_spec("fastparquet") is None:
-                raise
-        except Exception:
-            # Re-raise original behavior if we cannot detect fastparquet
+        # Continue to PyArrow single-file fallback
+        pass
+
+    # 3) PyArrow single-file read to avoid dataset partition columns
+    try:
+        return _read_geoparquet_via_pyarrow_singlefile(href)
+    except Exception:
+        # Continue to fastparquet fallback if available
+        pass
+
+    # 4) Fallback only if fastparquet is available
+    try:
+        if importlib.util.find_spec("fastparquet") is None:
             raise
-        return _read_geoparquet_via_fastparquet(href)
+    except Exception:
+        # Re-raise original behavior if we cannot detect fastparquet
+        raise
+    return _read_geoparquet_via_fastparquet(href)
 
 
 def _detect_geometry_column(df) -> Optional[tuple[str, str]]:
@@ -326,6 +412,64 @@ def _read_geoparquet_via_fastparquet(path):
     data = df.drop(columns=[geom_col]) if geom_col in df.columns else df
     # Default to EPSG:4326 if CRS not discoverable in this fallback path
     return gpd.GeoDataFrame(data, geometry=geom_series, crs="EPSG:4326")
+
+
+def _read_geoparquet_via_pyarrow_singlefile(path):
+    """Read a single Parquet file with PyArrow (no dataset), reconstructing geometry.
+
+    This avoids PyArrow's dataset engine injecting partition columns from the
+    directory path (e.g., `pos_bragg=0/`), which can collide with real columns
+    inside the file.
+    """
+    import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+    # Force single-file read (bypasses dataset partition parsing)
+    table = pq.read_table(path, use_legacy_dataset=True)
+    df = table.to_pandas()
+
+    detected = _detect_geometry_column(df)
+    if not detected:
+        # No obvious geometry found; return a plain GeoDataFrame without geometry
+        return gpd.GeoDataFrame(df)
+
+    geom_col, fmt = detected
+    if fmt == "wkb":
+        geom_series = _series_from_wkb(df[geom_col])
+    else:
+        geom_series = _series_from_wkt(df[geom_col])
+
+    data = df.drop(columns=[geom_col]) if geom_col in df.columns else df
+    gdf = gpd.GeoDataFrame(data, geometry=geom_series)
+
+    # Try to set CRS from GeoParquet metadata; otherwise default to EPSG:4326
+    try:
+        meta = table.schema.metadata or {}
+        if b"geo" in meta:
+            try:
+                geo_meta = json.loads(meta[b"geo"].decode("utf-8"))
+                primary = geo_meta.get("primary_column") or geom_col
+                col_meta = (geo_meta.get("columns") or {}).get(primary, {})
+                crs_def = col_meta.get("crs") or col_meta.get("srs")
+                if isinstance(crs_def, dict):
+                    wkt = crs_def.get("wkt") or crs_def.get("value")
+                    if isinstance(wkt, str) and wkt.strip():
+                        gdf.set_crs(wkt, allow_override=True, inplace=True)
+                elif isinstance(crs_def, str) and crs_def.strip():
+                    gdf.set_crs(crs_def, allow_override=True, inplace=True)
+                else:
+                    gdf.set_crs("EPSG:4326", allow_override=True, inplace=True)
+            except Exception:
+                gdf.set_crs("EPSG:4326", allow_override=True, inplace=True)
+        else:
+            gdf.set_crs("EPSG:4326", allow_override=True, inplace=True)
+    except Exception:
+        # Best-effort default CRS if anything fails
+        try:
+            gdf.set_crs("EPSG:4326", allow_override=True, inplace=True)
+        except Exception:
+            pass
+
+    return gdf
 
 
 def resolve_asset_href(asset, item, stac_path):
@@ -574,86 +718,204 @@ def main():
                 st.session_state["browse_mode"] = True
                 _rerun()
 
-    # Hierarchical STAC navigation down to collections
+    # Hierarchical STAC navigation down to collections using STAC relations
     selected_collection = None
     items_from_catalog_level = False
+    loose_item_hrefs: list[str] = []
 
-    if isinstance(root, Collection):
-        selected_collection = root
-    else:
-        # Initialize navigator stack with root catalog href
-        if "stac_nav_stack" not in st.session_state:
-            try:
-                root_href = root.get_self_href() or selected_path
-            except Exception:
-                root_href = selected_path
-            st.session_state["stac_nav_stack"] = [root_href]
-
-        nav_stack = st.session_state.get("stac_nav_stack", [])
-        curr_href = nav_stack[-1]
+    # Track current catalog href in session; start at the selected root (supports Catalog or Collection)
+    if "current_catalog_href" not in st.session_state:
         try:
-            curr_catalog = Catalog.from_file(curr_href)
+            st.session_state["current_catalog_href"] = root.get_self_href() or selected_path
         except Exception:
-            curr_catalog = root
-            nav_stack = [root.get_self_href() or selected_path]
-            st.session_state["stac_nav_stack"] = nav_stack
-
-        # Breadcrumbs
+            st.session_state["current_catalog_href"] = selected_path
+    curr_href = st.session_state["current_catalog_href"]
+    try:
+        curr_catalog = Catalog.from_file(curr_href)
+    except Exception:
         try:
-            crumb_ids = []
-            for href in nav_stack:
+            curr_catalog = Collection.from_file(curr_href)
+        except Exception as e:
+            st.error("Failed to load STAC at '{}': {}".format(curr_href, e))
+            st.stop()
+
+    # Parent/root navigation based on rel links
+    parent_href = _get_rel_href(curr_catalog, "parent", curr_href)
+    root_href = _get_rel_href(curr_catalog, "root", curr_href)
+    nav_cols = st.sidebar.columns([1, 1])
+    with nav_cols[0]:
+        if st.button("← Parent", disabled=(parent_href is None), use_container_width=True):
+            if parent_href:
+                st.session_state["current_catalog_href"] = parent_href
+                _rerun()
+    with nav_cols[1]:
+        if st.button("⟲ Root", disabled=(root_href is None), use_container_width=True):
+            if root_href:
+                st.session_state["current_catalog_href"] = root_href
+                _rerun()
+    try:
+        label = curr_catalog.title or curr_catalog.id or os.path.basename(curr_href)
+    except Exception:
+        label = os.path.basename(curr_href)
+    st.sidebar.caption("Current catalog: {}".format(label))
+
+    # Immediate subcatalogs and collections (using rel=child internally)
+    debug = {
+        "current_href": curr_href,
+        "current_type": type(curr_catalog).__name__,
+        "self_href": getattr(curr_catalog, "get_self_href", lambda: None)(),
+    }
+
+    # Try direct children via PySTAC
+    try:
+        subcats = list(curr_catalog.get_children()) if curr_catalog is not None else []
+    except Exception as e:
+        debug["get_children_error"] = str(e)
+        subcats = []
+    debug["children_count_get_children"] = len(subcats)
+
+    # Fallback 1: resolve rel=child links from the in-memory links
+    loaded = []
+    child_hrefs_mem = []
+    raw_child_links: list[tuple[str, Optional[str]]] = []
+    if not subcats and curr_catalog is not None:
+        try:
+            for lk in getattr(curr_catalog, "links", []) or []:
+                if getattr(lk, "rel", None) != "child":
+                    continue
+                href = None
                 try:
-                    c = Catalog.from_file(href)
-                    crumb_ids.append(c.id)
+                    href = lk.get_absolute_href()  # type: ignore[attr-defined]
                 except Exception:
-                    crumb_ids.append(os.path.basename(href))
-            st.sidebar.caption("Path: " + " / ".join(crumb_ids))
+                    href = None
+                if not href:
+                    base = getattr(curr_catalog, "get_self_href", lambda: None)() or curr_href
+                    href = make_absolute_href(getattr(lk, "target", None) or getattr(lk, "href", None), base)
+                if href:
+                    child_hrefs_mem.append(href)
+            for h in child_hrefs_mem:
+                try:
+                    try:
+                        loaded.append(Catalog.from_file(h))
+                    except Exception:
+                        loaded.append(Collection.from_file(h))
+                except Exception:
+                    continue
+            if loaded:
+                subcats = loaded
+        except Exception as e:
+            debug["fallback_mem_links_error"] = str(e)
+        debug["child_hrefs_from_links"] = child_hrefs_mem
+        debug["children_count_from_links"] = len(loaded)
+
+    # Fallback 2: parse the JSON file directly to extract rel=child links
+    loaded = []
+    child_hrefs_file = []
+    if not subcats:
+        try:
+            with open(curr_href, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+            links = doc.get("links") or []
+            base = curr_href
+            for lk in links:
+                try:
+                    if lk.get("rel") != "child":
+                        continue
+                    href = lk.get("href")
+                    if not href:
+                        continue
+                    abs_href = make_absolute_href(href, base)
+                    child_hrefs_file.append(abs_href)
+                    raw_child_links.append((abs_href, lk.get("title") or lk.get("id")))
+                except Exception:
+                    continue
+            for h in child_hrefs_file:
+                try:
+                    try:
+                        loaded.append(Catalog.from_file(h))
+                    except Exception:
+                        loaded.append(Collection.from_file(h))
+                except Exception:
+                    continue
+            if loaded:
+                subcats = loaded
+        except Exception as e:
+            debug["fallback_file_parse_error"] = str(e)
+        debug["child_hrefs_from_file"] = child_hrefs_file
+        debug["children_count_from_file"] = len(loaded)
+    debug["raw_child_links_count"] = len(raw_child_links)
+    try:
+        level_colls = list(curr_catalog.get_collections()) if curr_catalog is not None else []
+    except Exception as e:
+        debug["get_collections_error"] = str(e)
+        level_colls = []
+    debug["collections_count"] = len(level_colls)
+
+    # Early debug panel so it shows even if we stop later
+    # Console-only debug (no UI panel)
+    if DEBUG_MODE:
+        try:
+            print("[STAC DEBUG]", json.dumps(debug)[:2000], flush=True)
         except Exception:
             pass
 
-        # Back to parent catalog
-        if len(nav_stack) > 1 and st.sidebar.button("⬅ Back to parent catalog"):
-            st.session_state["stac_nav_stack"] = nav_stack[:-1]
-            _rerun()
-
-        # Immediate subcatalogs and collections
-        try:
-            subcats = list(curr_catalog.get_children())
-        except Exception:
-            subcats = []
-        try:
-            level_colls = list(curr_catalog.get_collections())
-        except Exception:
-            level_colls = []
-
-        if subcats:
-            sub_choice = st.sidebar.selectbox("Subcatalog", subcats, format_func=lambda c: getattr(c, "id", "(unnamed)"))
-            if st.sidebar.button("Enter subcatalog"):
-                href = sub_choice.get_self_href() or make_absolute_href("catalog.json", curr_href)
-                st.session_state["stac_nav_stack"].append(href)
+    if subcats:
+        st.sidebar.caption("Subcatalogs ({})".format(len(subcats)))
+        def _on_change_subcat():
+            sc = st.session_state.get("subcat_choice")
+            if sc:
+                href = sc.get_self_href() or make_absolute_href("catalog.json", curr_href)
+                st.session_state["current_catalog_href"] = href
                 _rerun()
+        st.sidebar.selectbox(
+            "Subcatalog",
+            subcats,
+            key="subcat_choice",
+            format_func=lambda c: (getattr(c, "title", None) or getattr(c, "id", None) or "(unnamed)"),
+            on_change=_on_change_subcat,
+        )
 
-        if level_colls:
-            selected_collection = st.sidebar.selectbox("Collection", level_colls, format_func=lambda c: c.id)
+    if level_colls:
+        st.sidebar.caption("Collections ({})".format(len(level_colls)))
+        coll_options = [None] + level_colls
+        def _format_coll(c):
+            if c is None:
+                return "— Select a collection —"
+            return getattr(c, "title", None) or getattr(c, "id", None) or "(unnamed)"
+        selected_collection = st.sidebar.selectbox(
+            "Collection",
+            coll_options,
+            format_func=_format_coll,
+            index=0,
+        )
+    else:
+        # Detect Items linked directly from this catalog (rel=item) without recursion
+        try:
+            item_links_present = any(getattr(lk, "rel", None) == "item" for lk in (curr_catalog.links or []))
+        except Exception as e:
+            debug["item_links_detect_error"] = str(e)
+            item_links_present = False
+
+        # Prefer navigation; do not auto-list Items here
+        if subcats or level_colls:
+            if item_links_present:
+                st.sidebar.checkbox("Show items at this level", value=False, key="show_items_here")
+                items_from_catalog_level = bool(st.session_state.get("show_items_here"))
         else:
-            with st.sidebar.expander("Descendant collections", expanded=False):
+            if item_links_present:
+                st.sidebar.info("This catalog has Items directly. Showing Items without a collection.")
+                items_from_catalog_level = True
+            else:
+                # If there are child links but none could be loaded, inform the user clearly
                 try:
-                    all_colls = list(root.get_all_collections())
+                    child_links_count = sum(1 for lk in (curr_catalog.links or []) if getattr(lk, "rel", None) == "child")
                 except Exception:
-                    all_colls = []
-                if all_colls:
-                    selected_collection = st.selectbox("Collection", all_colls, format_func=lambda c: c.id)
+                    child_links_count = 0
+                if child_links_count > 0:
+                    err_msg = debug.get("get_children_error") or "Child links could not be loaded."
+                    st.error("Found {} child links, but they could not be opened. {}".format(child_links_count, err_msg))
                 else:
-                    # No collections anywhere; see if there are items at this catalog level
-                    try:
-                        peek = list(islice(curr_catalog.get_items(), 1))
-                    except Exception:
-                        peek = []
-                    if peek:
-                        st.sidebar.info("This catalog has Items directly. Showing Items without a collection.")
-                        items_from_catalog_level = True
-                    else:
-                        st.caption("No collections at this level.")
+                    st.caption("No collections at this level.")
 
     # Determine the source of items to paginate: from a selected collection, or from the
     # current catalog level if it contains items directly
@@ -676,23 +938,55 @@ def main():
 
     start = (curr_page - 1) * int(page_size)
     end = start + int(page_size)
-    if collection is not None:
+    debug["pagination"] = {"page": curr_page, "page_size": int(page_size), "start": start, "end": end}
+    if collection is not None and collection is not False:
         try:
             items_iter = collection.get_items()
         except Exception:
             items_iter = collection.get_all_items()
     else:
         if items_from_catalog_level:
+            # Build an iterator only over items directly linked at this level
             try:
-                items_iter = curr_catalog.get_items()
+                # Define a lazy generator to resolve only the requested page of rel=item links
+                def _iter_item_links_paginated(catalog, start_idx, end_idx):
+                    base = catalog.get_self_href() or selected_path
+                    i = -1
+                    for lk in (catalog.links or []):
+                        if getattr(lk, "rel", None) != "item":
+                            continue
+                        i += 1
+                        if i < start_idx:
+                            continue
+                        if i >= end_idx:
+                            break
+                        href = None
+                        try:
+                            href = lk.get_absolute_href()  # type: ignore[attr-defined]
+                        except Exception:
+                            href = None
+                        if not href:
+                            href = make_absolute_href(getattr(lk, "target", None) or getattr(lk, "href", None), base)
+                        if not href:
+                            continue
+                        try:
+                            yield Item.from_file(href)
+                        except Exception:
+                            continue
+
+                items_iter = _iter_item_links_paginated(curr_catalog, start, end + 1)
             except Exception:
-                items_iter = curr_catalog.get_all_items()
+                items_iter = iter(())
         else:
+            if subcats or level_colls:
+                st.info("Select a subcatalog or a collection to continue.")
+                st.stop()
             st.warning("No collection selected.")
             st.stop()
     buf = list(islice(items_iter, start, end + 1))
     items_page = buf[: int(page_size)]
     has_next = len(buf) > int(page_size)
+    debug["items_page_counts"] = {"fetched": len(items_page), "has_next": bool(has_next)}
 
     nav_cols = st.sidebar.columns([1, 1, 2])
     with nav_cols[0]:
@@ -735,7 +1029,30 @@ def main():
         st.stop()
 
     href = resolve_asset_href(asset, item, selected_path)
-    gdf = load_asset(href)
+    # Clear and actionable errors when reading GeoParquet fails
+    if not os.path.exists(href):
+        st.error("Asset file not found: {}. Check relative paths in the STAC and your mounted volume.".format(href))
+        if DEBUG_MODE:
+            try:
+                print("[STAC DEBUG] missing_asset=", href, flush=True)
+            except Exception:
+                pass
+        st.stop()
+
+    try:
+        gdf = load_asset(href)
+    except Exception as e:
+        st.error(
+            "Failed to load GeoParquet asset at '{}': {}. "
+            "Tips: verify the file is a valid (Geo)Parquet, the path is correct relative to the item, "
+            "and that the image has a Parquet engine (pyarrow or fastparquet).".format(href, e)
+        )
+        if DEBUG_MODE:
+            try:
+                print("[STAC DEBUG] geoparquet_read_error path=", href, " error=", str(e), flush=True)
+            except Exception:
+                pass
+        st.stop()
 
     # Column metadata from STAC Table extension (if available)
     col_meta = _extract_table_columns_meta(collection, item, asset_key, asset)
@@ -1084,6 +1401,13 @@ def main():
                 pass
 
     st.components.v1.html(m._repr_html_(), height=700)
+
+    # Console-only debug (no UI panel)
+    if DEBUG_MODE:
+        try:
+            print("[STAC DEBUG]", json.dumps(debug)[:2000], flush=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

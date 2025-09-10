@@ -41,12 +41,12 @@ jobs:
             type=raw,value=latest
             type=ref,event=tag
 
-      - name: Build and Push Multi-Arch
+      - name: Build and Push Multi-Arch (64-bit only)
         uses: docker/build-push-action@v6
         with:
           context: scripts/stac_browser
           file: scripts/stac_browser/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -49,3 +49,12 @@ Rendimiento:
 
 Ejemplos:
 - Si quieres empezar desde un directorio padre (que aún no es STAC) y navegar hasta una colección concreta (p. ej. `.../hf_radial_metrics_aws_ingestion/hf_ingestion/VILA/HF-Radar-VILA1`), monta ese directorio padre en `/data` y deja `STAC_PATH=/data` o la ruta relativa dentro. La app abrirá un explorador de carpetas para que navegues hasta el `catalog.json`/`collection.json` correspondiente.
+
+### Requisitos de arquitectura
+
+- Imágenes publicadas: `linux/amd64` y `linux/arm64` (64‑bit). No se publica `linux/arm/v7` (32‑bit).
+- Raspberry Pi: se requiere un sistema operativo de 64‑bit (kernel `aarch64`, userland `arm64`). Raspberry Pi OS 64‑bit o Ubuntu Server 64‑bit funcionan.
+- Motivo: la app depende de `pyarrow`, que no tiene ruedas oficiales para 32‑bit en Linux; en 32‑bit pip intenta compilar desde fuente y falla.
+- Cómo verificar en el dispositivo:
+  - `uname -m` → `aarch64` (64‑bit) vs `armv7l`/`armv6l` (32‑bit)
+  - `dpkg --print-architecture` → `arm64` (64‑bit) vs `armhf` (32‑bit)
