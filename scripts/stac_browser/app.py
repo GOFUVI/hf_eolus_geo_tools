@@ -286,38 +286,31 @@ def load_asset(href):
     4) As a last resort (e.g., PyArrow absent on some platforms), fall back to
        pandas+fastparquet and reconstruct geometry.
     """
-    # 1) GeoPandas with legacy dataset (if supported)
+    last_err: Optional[Exception] = None
+
+    # 1) PyArrow single-file read to avoid dataset partition columns (version-agnostic)
     try:
-        return gpd.read_parquet(href, use_legacy_dataset=True)  # type: ignore[call-arg]
-    except TypeError:
-        # Older GeoPandas/Pandas may not accept this kwarg
-        pass
-    except Exception:
-        # Continue to next strategy
-        pass
+        return _read_geoparquet_via_pyarrow_singlefile(href)
+    except Exception as e:
+        last_err = e
 
     # 2) GeoPandas default
     try:
         return gpd.read_parquet(href)
-    except Exception:
-        # Continue to PyArrow single-file fallback
-        pass
+    except Exception as e:
+        last_err = e
 
-    # 3) PyArrow single-file read to avoid dataset partition columns
+    # 3) Fallback to fastparquet if available
     try:
-        return _read_geoparquet_via_pyarrow_singlefile(href)
-    except Exception:
-        # Continue to fastparquet fallback if available
-        pass
+        if importlib.util.find_spec("fastparquet") is not None:
+            return _read_geoparquet_via_fastparquet(href)
+    except Exception as e:
+        last_err = e
 
-    # 4) Fallback only if fastparquet is available
-    try:
-        if importlib.util.find_spec("fastparquet") is None:
-            raise
-    except Exception:
-        # Re-raise original behavior if we cannot detect fastparquet
-        raise
-    return _read_geoparquet_via_fastparquet(href)
+    # If all strategies fail, raise the last captured error for clarity
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Failed to load GeoParquet asset: no available reader succeeded")
 
 
 def _detect_geometry_column(df) -> Optional[tuple[str, str]]:
@@ -423,8 +416,9 @@ def _read_geoparquet_via_pyarrow_singlefile(path):
     """
     import pyarrow.parquet as pq  # type: ignore[import-not-found]
 
-    # Force single-file read (bypasses dataset partition parsing)
-    table = pq.read_table(path, use_legacy_dataset=True)
+    # Force single-file read by opening the file directly (no dataset engine)
+    pf = pq.ParquetFile(path)
+    table = pf.read()
     df = table.to_pandas()
 
     detected = _detect_geometry_column(df)

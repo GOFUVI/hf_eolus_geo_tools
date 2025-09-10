@@ -14,6 +14,7 @@
 #     --output-prefix PREFIX \
 #     --output-table TABLE \
 #     [--partition-cols COL1,COL2] \
+#     [--geometry-column NAME] \
 #     [--profile PROFILE] \
 #     [--log-dir DIR] \
 #     [--help]
@@ -69,9 +70,10 @@ BUCKET_NAME=""
 OUTPUT_PREFIX=""
 OUTPUT_TABLE=""
 PARTITION_COLS=""
+GEOMETRY_COLUMN="geometry"
 
 SHORTOPTS=""
-LONGOPTS="db-name:,bucket-name:,output-prefix:,output-table:,partition-cols:,profile:,log-dir:,help"
+LONGOPTS="db-name:,bucket-name:,output-prefix:,output-table:,partition-cols:,geometry-column:,profile:,log-dir:,help"
 PARSED=$(getopt --options="$SHORTOPTS" --longoptions="$LONGOPTS" --name "$0" -- "$@") || { usage; exit 2; }
 eval set -- "$PARSED"
 while true; do
@@ -81,6 +83,7 @@ while true; do
     --output-prefix) OUTPUT_PREFIX="$2"; shift 2;;
     --output-table) OUTPUT_TABLE="$2"; shift 2;;
     --partition-cols) PARTITION_COLS="$2"; shift 2;;
+    --geometry-column) GEOMETRY_COLUMN="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --help) usage; exit 0;;
@@ -129,7 +132,7 @@ docker run --rm \
   -v "${PWD}":/work \
   -v "${DATA_DIR}":/data:rw \
   -w /work \
-  python:3.11-slim bash -lc "pip install --no-cache-dir pyarrow shapely >/tmp/pip.log && python scripts/aggregation/merge_parquet.py --root /data && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column geometry" >> "$LOG_FILE" 2>&1
+  python:3.11-slim bash -lc "pip install --no-cache-dir 'pyarrow==16.1.0' 'shapely==2.0.4' >/tmp/pip.log && python scripts/aggregation/merge_parquet.py --root /data && python scripts/aggregation/add_geoparquet_metadata.py --local-path /data --geometry-column '${GEOMETRY_COLUMN}'" >> "$LOG_FILE" 2>&1
 
 log "Syncing dataset back to $S3_PATH"
 aws s3 sync "$DATA_DIR" "$S3_PATH" --exclude "query_results/*" --delete --profile "$PROFILE" --region "$REGION" >> "$LOG_FILE" 2>&1
