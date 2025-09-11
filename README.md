@@ -84,35 +84,46 @@ After this step, you will have a GeoJSON polygon that delineates the dataset's f
 
 ### 2. Grid Generation
 
-*Script:* `grid_generator.sh` -- **Generate analysis grid points or cells** within the coverage area.
+*Script:* `scripts/grids/create_grid_table.sh` — **Generate analysis grid points** within the coverage area and publish them as a GeoParquet-backed Athena table.
 
-**Description:** The second step defines a uniform spatial grid covering the region of interest (usually the radar hull or an intersection of multiple radar hulls and possibly a model domain). This grid will serve as the target locations for mapping the radar data and performing comparisons with model outputs. The script can create either: - **Point grid:** a set of points (e.g., center of each grid cell) at specified resolution (e.g., every 0.05° in latitude and longitude, or a certain kilometer spacing). - **Polygon grid:** actual cell polygons (e.g., squares or hexagons) covering the area.
+**Description:** With the footprint from step 1 in hand (a GeoJSON hull), this step defines a regular grid of points covering that area. You control the spacing in kilometers and can optionally apply a buffer around the hull. Under the hood, a Dockerized Python helper builds a GeoParquet file, then the script uploads it to S3 and creates an Athena table with columns `node_id` and `geometry` (WKB, WGS84). The resulting grid becomes the spatial scaffold for mapping and aggregation.
 
-The grid generation will typically be constrained to the radar coverage polygon, so that points outside the coverage hull are excluded. If a meteorological model grid is provided, the script can also **import an existing grid** (e.g., from a NetCDF file of a model) and just filter it to the hull bounding box or polygon. In that case, the grid spacing and projection match the model's. Otherwise, you can specify a resolution or use a default.
+The primary mode uses a hull file to generate points constrained to the polygon; alternatively, you can provide a manual CSV of nodes (`node_id,longitude,latitude`) to use on its own or to augment the generated grid.
 
-The output is a GeoParquet file with the grid geometry for each cell (point or polygon) and attributes like `cell_id` or grid indices. All grid points have latitude/longitude (or the specified CRS) and collectively cover the hull area. This acts as a template onto which radar data will be interpolated or aggregated.
+**Inputs:**
 
-**Inputs:** Either: - The hull polygon from step 1 (Parquet or GeoJSON). The script will read the polygon to know the region to cover. - Parameters for grid spacing and extent. For example, `--resolution 0.05` degrees or `--dx 5 --dy 5` km, etc. If using a model grid, an input model file or grid definition might be provided (e.g., `--model-grid WRF_domain.nc`). - Optionally, a coordinate reference system (CRS) if different from WGS84. By default WGS84 lat/lon is assumed for the grid unless a projection is needed.
+- AWS profile, database, output table name, S3 path for the grid dataset, and an S3 location for Athena query results.
+- Either a GeoJSON hull from step 1 (`--hull-file`) with a node prefix and spacing, or a `--manual-csv` with explicit nodes. Model grid import is not supported by this utility.
 
-**Usage Example:**
+**Usage Example (from hull):**
 
-    # Generate a latitude-longitude point grid at 0.05° resolution for station ABCD's area
-    bash scripts/grid_generator.sh --hull outputs/ABCD_hull.parquet \
-        --resolution 0.05 \
-        --output outputs/ABCD_grid.parquet
+    bash scripts/grids/create_grid_table.sh \
+      --profile my-aws \
+      --database geodata \
+      --hull-file outputs/footprint_hull.geojson \
+      --node-prefix G \
+      --grid-spacing-km 10 \
+      --output-table grid_nodes \
+      --table-location s3://my-bucket/grids/grid_nodes/ \
+      --output-location s3://my-bucket/athena-results/
 
-This command takes the hull polygon of station ABCD and generates a grid of points spaced 0.05 degrees (\~5 km) in lat/lon covering that polygon. The resulting `ABCD_grid.parquet` will contain many points, each with columns like `latitude, longitude, geometry` (geometry could be identical to the point coordinates) and possibly an index or cell ID.
+This generates points every ~10 km within the hull, writes a GeoParquet dataset to the specified S3 location, and registers the Athena table `geodata.grid_nodes`.
 
-If using a model grid, usage might be:
+**Usage Example (manual nodes only):**
 
-    # Use an existing model grid from a NetCDF, filter to hull area
-    bash scripts/grid_generator.sh --hull outputs/ABCD_hull.parquet \
-        --model-grid data/WindModel_Grid.nc \
-        --output outputs/ABCD_modelgrid.parquet
+    bash scripts/grids/create_grid_table.sh \
+      --profile my-aws \
+      --database geodata \
+      --manual-csv data/custom_nodes.csv \
+      --output-table grid_nodes \
+      --table-location s3://my-bucket/grids/grid_nodes/ \
+      --output-location s3://my-bucket/athena-results/
 
-In this case, the script would read the model grid file (which contains lat/lon for each grid cell, or a known projection), select points within the hull, and output them. This ensures the radar data will be mapped onto the model's grid coordinates for direct comparison.
+You can preview a local GeoParquet grid with the viewer:
 
-The grid Parquet dataset will follow GeoParquet conventions: for example, if points, the `geometry` column is of type Point for each grid location, and metadata declares WGS84 as the CRS[\[3\]]. Having the grid in Parquet makes it easy to join with radar data later or query specific locations if needed.
+    bash scripts/grids/view_grid.sh --input path/to/grid_nodes.parquet --output grid_map.html
+
+The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[\[3\]]. For option details, see `docs/grids.md`.
 
 ### 3. Radar Data Mapping
 
