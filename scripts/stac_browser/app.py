@@ -47,6 +47,9 @@ st.set_page_config(page_title="STAC Geoparquet Browser", layout="wide")
 # Default colormap name (bright on dark background)
 DEFAULT_COLORMAP_NAME = os.environ.get("COLORMAP", "YlOrRd")
 DEBUG_MODE = str(os.environ.get("STAC_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
+# Parquet engine preference: 'auto' | 'pyarrow' | 'fastparquet'
+PARQUET_ENGINE_PREF = str(os.environ.get("PARQUET_ENGINE", "auto")).strip().lower()
+DISABLE_PYARROW = str(os.environ.get("DISABLE_PYARROW", "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def get_colormap_by_name(name):
@@ -275,39 +278,86 @@ def find_loose_item_hrefs_near(href_or_dir: str) -> list[str]:
 
 @st.cache_data
 def load_asset(href):
-    """Load a GeoParquet robustly, avoiding PyArrow dataset partition collisions.
+    """Load a GeoParquet robustly, with selectable Parquet engine to avoid SIGILL on some ARM CPUs.
 
-    Preferred path:
-    1) Try GeoPandas with `use_legacy_dataset=True` to force single-file reads (prevents
-       synthetic partition columns from folder names like `pos_bragg=0/`).
-    2) If that fails, try GeoPandas default reader.
-    3) If still failing (e.g., due to dataset merge/type issues), read via PyArrow
-       single-file and reconstruct geometry from WKB/WKT if present.
-    4) As a last resort (e.g., PyArrow absent on some platforms), fall back to
-       pandas+fastparquet and reconstruct geometry.
+    Selection order:
+    - If PARQUET_ENGINE=fastparquet or DISABLE_PYARROW=1: try fastparquet first, then GeoPandas fallback,
+      and skip PyArrow path unless everything else fails.
+    - If PARQUET_ENGINE=pyarrow: try PyArrow single-file first, then GeoPandas fallback, then fastparquet.
+    - If PARQUET_ENGINE=auto (default): try PyArrow single-file, then GeoPandas, then fastparquet.
     """
     last_err: Optional[Exception] = None
 
-    # 1) PyArrow single-file read to avoid dataset partition columns (version-agnostic)
-    try:
-        return _read_geoparquet_via_pyarrow_singlefile(href)
-    except Exception as e:
-        last_err = e
+    def _try_fastparquet():
+        nonlocal last_err
+        try:
+            if importlib.util.find_spec("fastparquet") is not None:
+                return _read_geoparquet_via_fastparquet(href)
+        except Exception as e:
+            last_err = e
+        return None
 
-    # 2) GeoPandas default
-    try:
-        return gpd.read_parquet(href)
-    except Exception as e:
-        last_err = e
+    def _try_pyarrow_single():
+        nonlocal last_err
+        try:
+            return _read_geoparquet_via_pyarrow_singlefile(href)
+        except Exception as e:
+            last_err = e
+            return None
 
-    # 3) Fallback to fastparquet if available
-    try:
-        if importlib.util.find_spec("fastparquet") is not None:
-            return _read_geoparquet_via_fastparquet(href)
-    except Exception as e:
-        last_err = e
+    def _try_geopandas_default():
+        nonlocal last_err
+        try:
+            return gpd.read_parquet(href)
+        except Exception as e:
+            last_err = e
+            return None
 
-    # If all strategies fail, raise the last captured error for clarity
+    prefer_fastparquet = DISABLE_PYARROW or (PARQUET_ENGINE_PREF == "fastparquet")
+    prefer_pyarrow = PARQUET_ENGINE_PREF == "pyarrow"
+
+    # Fastparquet-first path
+    if prefer_fastparquet:
+        out = _try_fastparquet()
+        if out is not None:
+            return out
+        # Avoid importing PyArrow unless other options fail
+        out = _try_geopandas_default()
+        if out is not None:
+            return out
+        # As a last resort, try PyArrow single-file
+        out = _try_pyarrow_single()
+        if out is not None:
+            return out
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("Failed to load GeoParquet asset: no available reader succeeded")
+
+    # PyArrow-first path (explicit)
+    if prefer_pyarrow:
+        out = _try_pyarrow_single()
+        if out is not None:
+            return out
+        out = _try_geopandas_default()
+        if out is not None:
+            return out
+        out = _try_fastparquet()
+        if out is not None:
+            return out
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("Failed to load GeoParquet asset: no available reader succeeded")
+
+    # Auto: PyArrow single-file → GeoPandas → fastparquet
+    out = _try_pyarrow_single()
+    if out is not None:
+        return out
+    out = _try_geopandas_default()
+    if out is not None:
+        return out
+    out = _try_fastparquet()
+    if out is not None:
+        return out
     if last_err is not None:
         raise last_err
     raise RuntimeError("Failed to load GeoParquet asset: no available reader succeeded")

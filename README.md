@@ -58,3 +58,12 @@ Ejemplos:
 - Cómo verificar en el dispositivo:
   - `uname -m` → `aarch64` (64‑bit) vs `armv7l`/`armv6l` (32‑bit)
   - `dpkg --print-architecture` → `arm64` (64‑bit) vs `armhf` (32‑bit)
+
+### Problemas conocidos y solución
+
+- Error 132 (Illegal instruction) al acceder a la app en algunas Raspberry Pi 64‑bit:
+  - Causa probable: la rueda de `pyarrow` para `aarch64` puede usar instrucciones no soportadas por ciertos SoC/CPU de ARM (p. ej., generaciones más antiguas) y provocar SIGILL al importarse.
+  - Mitigación: forzar el uso de `fastparquet` para leer Parquet/GeoParquet evitando importar `pyarrow`.
+  - Cómo: establecer la variable de entorno `PARQUET_ENGINE=fastparquet` al ejecutar el contenedor:
+    - `docker run -e PARQUET_ENGINE=fastparquet ... stac-browser`
+  - Notas: la imagen incluye `fastparquet`. Con esta opción se leerán Parquet/GeoParquet reconstruyendo la geometría desde WKB/WKT; si el CRS no está disponible en metadatos, se asume `EPSG:4326`.
