@@ -59,27 +59,28 @@ The typical workflow is divided into four main stages, each performed by a dedic
 
 ### 1. Coverage Hull Generation
 
-*Script:* `hull_generator.sh` (for example) -- **Generate station coverage hull polygons** from input radar data.
+*Script:* `scripts/hulls/convex_hulls.sh` — **Generate coverage hull polygons** from Athena tables.
 
-**Description:** The first step computes the geographic area covered by an HF radar station's measurements. Using the set of all observation points from the radar (e.g., all echo locations over a period), the script derives a **hull polygon** that encloses the coverage area. By default, it uses a *concave hull* algorithm to tightly wrap around the outermost points (ensuring the shape follows the actual coverage outline, which may be concave along a coast). If data points are sparse or noisy at the edges, options are available to adjust hull tightness or filter out outliers before hull calculation.
+**Description:** The first step delineates the geographic footprint of your input dataset. Starting from point geometries stored in one or more AWS Athena tables (each exposing a `geometry` column), the script computes a **convex hull** for each table and then combines them via union or intersection to produce a final footprint polygon. This approach gives a clean envelope around all observed points; if you need a tighter outline (concave hull), that would require a different tool outside this utility.
 
-The output is a GeoParquet file containing the hull geometry (or multiple geometries). Typically, each radar station will have one polygon representing its coverage area. This file conforms to the GeoParquet standard -- it has a geometry column (WKB format) with CRS WGS84 by default[\[3\]], and properties such as station ID, hull algorithm, date range of data used, etc.
+The output is a GeoJSON file containing the hull geometry. Typically, each run will produce one polygon representing the dataset's footprint. You can keep this GeoJSON alongside your artifacts and use it directly in the next step to constrain grid creation.
 
-**Inputs:** HF radar echo location data. This can be provided either as: - A Parquet or CSV file of point observations (with latitude/longitude for each echo), possibly the output of a prior ingestion step. - Or a directory of LLUV files (if the script supports reading them internally via Python/R). In most cases, using an intermediate Parquet of all points is more efficient.
+**Inputs:** One or more Athena tables that contain a `geometry` column (WKB points). Tables may be provided fully qualified (e.g., `database.table`) or with a default `--database`.
 
-You will specify the station (or input dataset) and any parameters for hull calculation (e.g., concave hull alpha value or whether to use convex hull). The script may accept arguments like `--station <ID>` and `--points-file <path>`.
+You will specify the AWS profile, database/tables, and how to combine per-table hulls (`--operation union|intersection`).
 
 **Usage Example:**
 
-    # Generate coverage hull for station ABCD using points from a Parquet file
-    bash scripts/hull_generator.sh --station ABCD \
-        --input data/radials/ABCD_all_points.parquet \
-        --output outputs/ABCD_hull.parquet \
-        --concave 1.0
+    # Build a convex hull from two Athena tables and write GeoJSON
+    bash scripts/hulls/convex_hulls.sh \
+        --profile my-aws \
+        --database geodata \
+        --tables cities,stations \
+        --output-file outputs/footprint_hull.geojson \
+        --output-location s3://my-bucket/athena-results/ \
+        --operation union
 
-In this example, `--concave 1.0` might control the concavity factor (alpha) for the hull (1.0 could mean moderately concave; if omitted, a convex hull might be used by default). The script reads all points for station **ABCD** from the input Parquet, computes the hull polygon, and writes it to `ABCD_hull.parquet`. The output Parquet will contain at least one row (the hull geometry) with metadata fields (station ID, area, etc.).
-
-After this step, you will have a geospatial polygon delineating the radar coverage. This polygon can be visualized on a map (by loading the Parquet in GIS software or using GeoPandas) to verify it correctly represents the station range. It will also be used in the next step to define the grid extent.
+After this step, you will have a GeoJSON polygon that delineates the dataset's footprint. You can preview it with the provided viewer (`scripts/hulls/view_hull.sh`) or load it in GIS software to verify the extent. It will be used in the next stage to define the grid area.
 
 ### 2. Grid Generation
 
