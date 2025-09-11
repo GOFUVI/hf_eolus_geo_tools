@@ -326,6 +326,13 @@ This repository provides a concise, script-driven workflow to turn large geospat
 
 For details on the underlying conventions, see the HF‑EOLUS specification repository[4]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
 
+## Utility Documentation
+
+- Hulls: docs/hulls.md
+- Grids: docs/grids.md
+- Mapping: docs/mapping.md
+- Aggregation: docs/aggregation.md
+
 [1] overview.md
 
 <https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/overview.md>
