@@ -1,6 +1,0 @@
-streamlit
-pystac
-geopandas
-folium
-pyarrow
-fastparquet
