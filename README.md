@@ -333,6 +333,18 @@ For details on the underlying conventions, see the HF‑EOLUS specification repo
 - Mapping: docs/mapping.md
 - Aggregation: docs/aggregation.md
 
+## Acknowledgements
+
+This work has been funded by the HF-EOLUS project (TED2021-129551B-I00), financed by MICIU/AEI /10.13039/501100011033 and by the European Union NextGenerationEU/PRTR - BDNS 598843 - Component 17 - Investment I3. Members of the Marine Research Centre (CIM) of the University of Vigo have participated in the development of this repository.
+
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+
+
+## References
+
 [1] overview.md
 
 <https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/overview.md>
@@ -350,3 +362,27 @@ For details on the underlying conventions, see the HF‑EOLUS specification repo
 <https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/README.md>
 
 [HF-EOLUS GeoParquet and STAC specification repository]: https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs
+
+---
+<p align="center">
+  <a href="https://next-generation-eu.europa.eu/">
+    <img src="logos/EN_Funded_by_the_European_Union_RGB_POS.png" alt="Funded by the European Union" height="80"/>
+  </a>
+  <a href="https://planderecuperacion.gob.es/">
+    <img src="logos/LOGO%20COLOR.png" alt="Logo Color" height="80"/>
+  </a>
+  <a href="https://www.aei.gob.es/">
+    <img src="logos/logo_aei.png" alt="AEI Logo" height="80"/>
+  </a>
+  <a href="https://www.ciencia.gob.es/">
+    <img src="logos/MCIU_header.svg" alt="MCIU Header" height="80"/>
+  </a>
+  <a href="https://cim.uvigo.gal">
+    <img src="logos/Logotipo_CIM_original.png" alt="CIM logo" height="80"/>
+  </a>
+  <a href="https://www.iim.csic.es/">
+    <img src="logos/IIM.svg" alt="IIM logo" height="80"/>
+  </a>
+
+  
+</p>
