@@ -2,15 +2,15 @@
 
 ## Overview
 
-**HF-EOLUS Geospatial Processing Tools** is a collection of command-line scripts designed to transform and analyze high-frequency (HF) radar measurements and related model data using modern cloud-optimized geospatial formats. The HF-EOLUS project deals with two major data streams -- (1) coastal HF radar observations of ocean surface conditions, and (2) meteorological model outputs -- which produce massive volumes of geospatial data that must be stored and accessed efficiently[\[1\]][][\[2\]]. To address this, the tools convert raw data into **GeoParquet** files (an OGC standard for geospatial **Parquet** data) and organize them with **STAC** (SpatioTemporal Asset Catalog) metadata[\[1\]][][\[2\]]. By using these open standards, the toolkit ensures that HF radar and model datasets are saved in a **compact, analysis-ready format** and described with **standardized metadata**, allowing scientists to leverage off-the-shelf analytics tools and easily discover data of interest[\[1\]][][\[2\]].
+**HF-EOLUS Geospatial Processing Tools** is a set of command‑line scripts to transform and analyze large geospatial point datasets using cloud‑optimized formats. While born in the HF‑radar context, the utilities are generic: they operate on Athena tables that expose a binary `geometry` column and on prepared local files where applicable, and they produce GeoParquet assets with optional STAC metadata[\[1\]][][\[2\]]. By leaning on open standards, the toolkit saves data in a **compact, analysis‑ready format** and describes it with **portable metadata**, so teams can use off‑the‑shelf analytics and quickly discover what they need.
 
-**What does this repository do?** In essence, it provides a step-by-step pipeline -- implemented as a series of shell scripts -- to go from raw HF radar outputs (and optional model data) to analysis-ready geospatial assets. Key features include:
+**What does this repository do?** It provides a step‑by‑step pipeline — implemented as shell scripts — to go from raw tabular geospatial data (e.g., sensor/model outputs or analytics results) to analysis‑ready assets. Key features include:
 
 -   **GeoParquet Conversion:** All output datasets are stored as Parquet files with embedded geospatial information (coordinates, geometry, CRS, etc.) following the **GeoParquet v1.1** specification[\[3\]]. This format stores geometries (points, polygons, etc.) in a binary column (e.g. WKB) along with coordinate reference metadata, making the files self-describing and directly readable by GIS software. Using columnar Parquet yields highly compressed files and fast query performance for large datasets.
 
--   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (as JSON files) describing the output data. STAC provides a standardized way to index data by space, time, and properties[\[4\]]. Each data product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** or catalogs for organization. This enables interoperability with STAC-compatible tools -- researchers can search and access HF-EOLUS data via common libraries (e.g. PySTAC) or STAC browsers instead of dealing with files manually.
+-   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (JSON) describing the outputs. STAC indexes data by space, time, and properties[\[4\]]. Each product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** for organization. This enables interoperability with STAC‑compatible tools — users can search and access the data via common libraries (e.g., PySTAC) or STAC browsers instead of handling files manually.
 
-By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and facilitate easy integration of HF radar measurements with other geospatial datasets[\[1\]]. For example, a single half-hour HF radar file can contain **tens of thousands of individual ocean current measurements**, and a week of data can exceed **one million points**[\[5\]] -- far too many for traditional CSV or text files to handle efficiently. Converting such data to GeoParquet reduces storage size and speeds up analysis by enabling SQL-like queries on the data. Meanwhile, STAC metadata makes it straightforward to find all radar observations in a given region or time range without needing a separate database. In summary, **HF-EOLUS Geo Tools** provides an end-to-end solution to *standardize, store, and catalog* HF radar and model data for scientific use.
+By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and fit naturally alongside other geospatial datasets[\[1\]]. A single time slice from a dense sensor network can contain **tens of thousands of points**, and a few weeks can exceed **millions**[\[5\]] — far beyond what CSV handles efficiently. Converting to GeoParquet cuts storage and accelerates columnar queries, while STAC makes it easy to find observations by region and time without a separate database. In short, this toolkit provides an end‑to‑end path to standardize, store, and catalog geospatial point data for analysis.
 
 ## Requirements
 
@@ -221,66 +221,110 @@ After aggregation you'll have a per-node time series ready for further analysis 
 
 ## STAC Catalog and Data Specifications
 
-The outputs produced by this toolkit adhere to the **HF-EOLUS GeoParquet and STAC specifications**[\[8\]][][\[6\]]. Here we provide a brief summary of these standards (refer to the official spec repository for full details):
+Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[\[8\]][][\[6\]]. In short:
 
--   **GeoParquet (OGC v1.1):** GeoParquet is an extension of Apache Parquet for geospatial data. Each Parquet file includes a special `geo` metadata object that defines geometry columns and the Coordinate Reference System. In our files, geometries are stored in a binary form (Well-Known Binary) in a column (often named `geometry`) at the top level[\[3\]]. The metadata specifies the geometry type (e.g., Point or Polygon), the CRS (usually WGS84 latitude-longitude), and bounding boxes, among other things. This means any GeoParquet file produced (hulls, grids, maps) can be opened by GIS tools or libraries like GeoPandas and will automatically recognize the geometry and coordinate system. By using Parquet, we gain efficient compression and the ability to query subset of columns -- for instance, one can read just the `u_current` and `v_current` fields from a currents Parquet without loading the entire dataset, which is ideal for cloud or large-scale analytics[\[9\]][][\[10\]].
+- **GeoParquet (OGC v1.1):** Parquet with a `geo` metadata block describing geometry columns and CRS. We store geometries in WKB (typically column `geometry`) with WGS84/CRS84; files are self‑describing and open directly in GIS/GeoPandas. Columnar storage yields compact size and fast, selective reads[\[3\]][\[9\]][\[10\]].
 
--   **STAC (SpatioTemporal Asset Catalog):** STAC is a JSON-based specification for cataloging geospatial assets. Our STAC catalog follows **STAC 1.0.0** core with the **Table Extension** (to describe tabular data like Parquet schemas) and some custom fields defined by HF-EOLUS. The catalog is organized as:
+- **STAC 1.0 + Table Extension:** Static JSON catalog describing Parquet assets. Structure: Catalog → Collections → Items. Each Item has a geometry (e.g., footprint or grid extent), datetime, and links to one or more Parquet assets; the Table Extension lists schema columns so users understand fields without opening files[\[4\]]. Works with STAC Browser and PySTAC.
 
--   A top-level **Catalog** (or Catalogs by data type) that links to one or more Collections.
+- **How we apply it:** Every Parquet produced (hulls, grids, mappings, aggregates) can be registered as an Item asset; aggregated products may form their own Collections or Items. Catalogs are portable and can be hosted anywhere as static files.
 
--   One or more **Collections**, each representing a dataset or product type. For example, "HF Radar Surface Currents (30 min)" could be a collection, and "HF Radar Monthly Averages" another. Collections contain metadata common to the dataset: e.g., description, license, spatial extent (bounding box of the data), temporal extent, providers, etc.
-
--   Many **Items** within each Collection, each corresponding to a specific spatiotemporal slice of the data (analogous to an image scene or data file). In our case, an Item might represent all data for a particular timestamp (for radar snapshots) or a particular aggregated period. Each Item has its own geometry (e.g., the convex hull of that radar map's coverage) and timestamp, plus links to the data assets.
-
-Every Parquet output is registered as an **asset** in some STAC Item. For instance, an Item for "2023-01-01 00:30 UTC currents" will have an asset pointing to `currents_20230101T0030Z.parquet` (just an example naming). The Item's properties include the station(s) involved, the time, and any processing flags. We also include the STAC **Table Extension** in Items/Collections to list the columns present in the Parquet and their meanings (e.g., columns `u_current` (unit: m/s, description: Eastward surface current) etc.), so users can understand the schema without opening the file[\[4\]].
-
-Using STAC, a scientist can query the dataset by time or location. For example, they could search the catalog for Items from a specific month and bounding box, rather than manually filtering files. The STAC catalog produced is a static set of JSON files, so it can be hosted on a website or simply shared as-is. It is compatible with any STAC client -- for instance, one can use `pystac.Client.open(<catalog_path>)` in Python to load the catalog and iterate through Items programmatically.
-
-**External Specification References:** For more details on the standards, see the [HF-EOLUS GeoParquet and STAC specification repository]. That repository contains comprehensive documentation of the conventions (GeoParquet metadata content, STAC layout, examples). The GeoParquet spec ensures our Parquet files meet interoperability requirements (geometry encoding, CRS specification, etc.)[\[3\]], and the STAC spec defines how we structure catalogs and items for HF radar data (including use of STAC extensions)[\[4\]]. By conforming to these, we align with international best practices and make the data *FAIR* (Findable, Accessible, Interoperable, Reusable).
+For complete details and examples, see the HF‑EOLUS specification repository referenced above.
 
 ## Example: End-to-End Workflow
 
-To illustrate a complete use case, imagine we want to process one month of HF radar data from two stations and compare to a model:
+To illustrate a complete HF‑radar use case, suppose we process one month of radials from two stations (ABCD and WXYZ).
 
-1.  **Hull:** We run the hull script for each radar station to get their coverage polygons. For station A and B:
+1.  **Hull:** Compute convex hulls from Athena and combine them (union) into a single coverage polygon.
 
--   bash scripts/hull_generator.sh --station A --input A_points.parquet --output A_hull.parquet
-        bash scripts/hull_generator.sh --station B --input B_points.parquet --output B_hull.parquet
+        bash scripts/hulls/convex_hulls.sh \
+          --profile my-aws \
+          --database hf \
+          --tables radials_abcd,radials_wxyz \
+          --output-file outputs/hf_coverage.geojson \
+          --output-location s3://my-bucket/athena-results/ \
+          --operation union
 
-    Suppose station A and B overlap in coverage; we could combine hulls or take the union if needed (the docs suggest the hull script can also output a merged hull if multiple stations given).
+2.  **Grid:** Create a 10 km grid within the hull and register it as an Athena table.
 
-2.  **Grid:** Define a grid covering both A and B. If we have a model grid file (say a regional model), use that:
+        bash scripts/grids/create_grid_table.sh \
+          --profile my-aws \
+          --database geodata \
+          --hull-file outputs/hf_coverage.geojson \
+          --node-prefix G \
+          --grid-spacing-km 10 \
+          --output-table grid_nodes \
+          --table-location s3://my-bucket/grids/grid_nodes/ \
+          --output-location s3://my-bucket/athena-results/
 
--   bash scripts/grid_generator.sh --hull A_hull.parquet --hull2 B_hull.parquet \
-            --model-grid WindModel_Domain.nc --output radar_model_grid.parquet
+3.  **Mapping:** Link each station’s radials to the nearest grid nodes (5 km search radius). Here, raw radials live in database `hf` while the grid and outputs are in `geodata`.
 
-    This yields `radar_model_grid.parquet` with points of the model grid that fall under the union of A and B's coverage.
+        bash scripts/mapping/geo_mapping.sh \
+          --db-name geodata \
+          --data-db-name hf \
+          --grid-db-name geodata \
+          --data-table radials_abcd \
+          --grid-table grid_nodes \
+          --bucket-name my-bucket \
+          --output-prefix mappings/hf/abcd/ \
+          --output-table radials_abcd_node_links \
+          --distance-km 5 \
+          --profile my-aws
 
-3.  **Mapping:** Map radar data to grid and pull model data:
+        bash scripts/mapping/geo_mapping.sh \
+          --db-name geodata \
+          --data-db-name hf \
+          --grid-db-name geodata \
+          --data-table radials_wxyz \
+          --grid-table grid_nodes \
+          --bucket-name my-bucket \
+          --output-prefix mappings/hf/wxyz/ \
+          --output-table radials_wxyz_node_links \
+          --distance-km 5 \
+          --profile my-aws
 
--   bash scripts/radar_mapping.sh --grid radar_model_grid.parquet \
-            --radials A_radials.parquet B_radials.parquet \
-            --model WindModel_Jan2023.nc --model-var U10,V10 \
-            --start "2023-01-01" --end "2023-01-31" \
-            --output currents_vs_model_Jan2023.parquet
+4.  **Aggregation:** Compute per‑node time‑series statistics. For radials, treat direction as angular (degrees) weighted by speed.
 
-    This reads the radials from station A and B for January 2023, computes total currents on each grid point (for each half-hour), and finds the corresponding model wind (U10,V10) at those points/times. The output Parquet might be partitioned by date. The script also creates a STAC collection (e.g., **collection:** "HF Radar Currents vs Model") and an item for each day or each file.
+        bash scripts/aggregation/aggregate_direction_wrapper.sh \
+          --db-name geodata \
+          --data-db-name hf \
+          --grid-db-name geodata \
+          --mapping-db-name geodata \
+          --data-table radials_abcd \
+          --grid-table grid_nodes \
+          --mapping-table radials_abcd_node_links \
+          --columns radial_speed,radial_dir_deg \
+          --direction-cols radial_dir_deg \
+          --magnitude-cols radial_speed \
+          --bucket-name my-bucket \
+          --output-prefix aggregates/hf/abcd/ \
+          --output-table abcd_radials_by_node \
+          --partition-cols date \
+          --profile my-aws
 
-4.  **Aggregation:** Analyze the differences:
+        bash scripts/aggregation/finalize_geoparquet.sh \
+          --db-name geodata \
+          --bucket-name my-bucket \
+          --output-prefix aggregates/hf/abcd/ \
+          --output-table abcd_radials_by_node \
+          --partition-cols date \
+          --profile my-aws
 
--   bash scripts/aggregate_analysis.sh --input currents_vs_model_Jan2023.parquet \
-            --daily-stats --output currents_vs_model_stats.parquet
+Optionally, package the aggregated dataset as a STAC catalog for sharing:
 
-    This hypothetical command computes daily statistics such as mean bias and RMSE of radar vs model currents. The output `currents_vs_model_stats.parquet` could have one row per day (with no geometry, since it's an overall stat), and perhaps another output `currents_Jan2023_mean.parquet` for the spatial field of average currents over the month (with geometry for each grid cell). We manually add these as assets in the STAC catalog or the script could handle that, e.g., adding an item "January 2023 Mean" with an asset linking to `currents_Jan2023_mean.parquet`.
+        bash scripts/aggregation/build_stac_catalog.sh \
+          --collection HF-Radar-ABCD-2023-01 \
+          --s3-uri s3://my-bucket/aggregates/hf/abcd/ \
+          --profile my-aws \
+          --zip-file abcd_catalog.zip
 
-Now we have a complete dataset of radar-derived currents and their comparison to model, all in Parquet and described by STAC. A researcher can download the Parquet files and use pandas or a GIS tool to examine the data. Or they can load the STAC catalog into a tool like **STAC Browser** or a Jupyter notebook with PySTAC to query, for example, "find all times when the current speed exceeded 0.5 m/s at a certain location" without opening each file manually. The use of open standards (Parquet, STAC) means this pipeline's outputs can be readily integrated into larger workflows, such as machine learning pipelines (reading Parquet directly into TensorFlow/PyTorch) or interactive web maps (serving data via a STAC API).
+You now have analysis‑ready HF‑radar statistics per grid node, stored as GeoParquet and, if desired, indexed by a portable STAC catalog.
 
 ## Conclusion
 
-The HF-EOLUS Geo Tools repository provides a detailed, script-driven workflow for converting raw HF radar data (and related model data) into a form that is **immediately usable by scientists**. By following the steps above, users can reproduce the processing: from delineating radar coverage areas, creating analysis grids, mapping and merging data, to generating final summarized products. The emphasis on **standard formats** cannot be overstated -- the GeoParquet files ensure that the spatial data can be accessed efficiently (no more giant text files), and the STAC catalog ensures that as the data volume grows, it remains discoverable and well-organized.
+This repository provides a concise, script-driven workflow to turn large geospatial point datasets and related model/sensor outputs into analysis‑ready assets. Following the steps above, you can go from delineating coverage areas, building analysis grids, and linking rows to grid nodes, to producing aggregated products and optional STAC catalogs. The focus on open standards keeps results portable and efficient: GeoParquet for compact, self‑describing storage and STAC for discoverability and interoperability.
 
-For further reading on the underlying data specifications, see the HF-EOLUS project's spec documentation[\[8\]][][\[6\]]. And for any questions or issues using these tools, please refer to the documentation in the `docs/` folder (which includes more detailed guides for each script) or contact the project maintainers. We hope these tools enable oceanographers and meteorologists to more easily work with HF radar datasets in their research, taking advantage of the latest in cloud-native geospatial technology.
+For details on the underlying conventions, see the HF‑EOLUS specification repository[\[8\]][][\[6\]]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
 
 [\[1\]][] [\[2\]][] [\[5\]] overview.md
 
