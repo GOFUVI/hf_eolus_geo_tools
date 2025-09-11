@@ -127,70 +127,97 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
 
 ### 3. Radar Data Mapping
 
-*Script:* `radar_mapping.sh` -- **Map HF radar observations to the grid and (optionally) combine with model data.**
+*Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius.
 
-**Description:** This is the core step where the high-frequency radar measurements are mapped onto the defined grid. There are two primary modes this script may handle: - **Vector Mapping (Total currents):** If multiple radars are available, the script can combine radial velocity components from different stations to compute full 2D current vectors on each grid point (similar to how CODAR totals are produced). In this mode, the script takes radial data from two or more stations, finds where their coverage overlaps on the grid, and solves for the u/v components at each grid cell (e.g., via least-squares). The result is a dataset of **vector currents on the grid** for each time step. - **Model Comparison Mapping:** If a model dataset is provided, the script maps each radar observation or derived vector to the nearest grid cell and pairs it with the corresponding model value. For example, it can project model winds or currents onto the radar radial direction (to get model "radial" components) and then compute differences. Alternatively, it interpolates radar-measured currents to the model grid points.
+**Description:** This step connects your source data to the grid built in step 2 by finding, for each input row, nearby grid node(s) within a given distance. It runs a CTAS query in Athena that pre-filters candidates with a latitude/longitude window and then applies geodesic `ST_Distance` on spherical geographies. The result is a compact link table you can join with your data or grid to drive downstream aggregation and analysis. This utility is generic: it works with any Athena table that has a binary WKB `geometry` column and a unique `rowid`.
 
-In practice, the script can produce time-indexed outputs. For each radar measurement time (say every 30 minutes), it will generate grid-based values. These could be in the form of separate output files per time or a partitioned Parquet where time is one of the partition keys.
+**Outputs:** A Parquet-backed Athena table containing `rowid, node_id` pairs stored at the S3 prefix you specify. Use these links to aggregate measurements by node, compute summaries on the grid, or join with additional attributes.
 
-**Outputs:** One or more GeoParquet files containing mapped data. Some possible output structures: - **Radar vector field Parquet:** Each row represents a grid cell at a given timestamp, with columns for the estimated U and V components of ocean current (or whatever quantity is measured) at that location/time, plus the geometry (point) of that grid cell. If multiple time steps, time could be another column or partition. This essentially is a gridded time series of the radar data. - **Difference or combined dataset Parquet:** If model data were included, the output might contain both the radar-derived value and model value at each grid cell/time, plus error metrics (difference, bias). For example, columns: `u_radar, v_radar, u_model, v_model, u_diff, v_diff` at each point/time.
+**Inputs:**
 
-All such outputs include spatial geometry and hence are GeoParquet-compliant. Time can be recorded as an ISO timestamp string or numeric datetime and will be included in STAC metadata later.
-
-The mapping script may also create intermediate files like a mapping matrix or weights, but those are usually internal. The primary interest is the final mapped results.
-
-**Inputs:** - The grid file from step 2 (`--grid outputs/ABCD_grid.parquet`). - Radar data: one or more input files containing radial observations. For example, two Parquet files for station ABCD and station WXYZ radials, each row having (time, location, radial\_speed, angle, etc.). If only one station is used, it might still map radial data to grid (though you can't get 2D vector from one station, you could still interpolate radial values onto grid points). - (Optional) Model data: a dataset of model values on the grid. This could be provided as a Parquet (if you pre-converted model output to Parquet) or directly from a model output file. If providing a model NetCDF, the script will read the necessary variable (e.g., U and V wind components) at the matching times and grid points. You might specify something like `--model data/WindModel_Output.nc` and `--model-var U10,V10` for wind components at 10m.
-
--   Additional arguments: time range to process (`--start 2023-01-01 --end 2023-01-31` for a month, for example) if you don't want the entire dataset, interpolation settings (nearest-neighbor or weighted average for mapping radars to grid), and quality filters (e.g., ignore radar data with high error flag).
-
-**Usage Example (Vector Mapping):**
-
-    # Map two radars into total vector currents on the grid for January 2023
-    bash scripts/radar_mapping.sh --grid outputs/ABCD_grid.parquet \
-        --radials station_ABCD.parquet station_WXYZ.parquet \
-        --start "2023-01-01" --end "2023-01-31" \
-        --output outputs/currents_202301.parquet
-
-This would take radial data from station ABCD and WXYZ, within January 2023, and produce a Parquet of merged vector currents on the predefined grid. The output file `currents_202301.parquet` would be partitioned by date or contain a timestamp column. Each row might look like: {station\_pair: ABCD+WXYZ, time: 2023-01-01T00:30:00Z, lat, lon, u\_current, v\_current, ..., geometry}. The geometry column is the grid point (same as in the grid Parquet, allowing spatial joins).
-
-**Usage Example (Radar vs Model Comparison):**
-
-    # Map radar ABCD radials to model grid and compare with model currents
-    bash scripts/radar_mapping.sh --grid outputs/ABCD_modelgrid.parquet \
-        --radials station_ABCD.parquet \
-        --model data/OceanModel.nc --model-var u_cur,v_cur \
-        --output outputs/ABCD_vs_model.parquet
-
-In this scenario, the script will project model u\_cur,v\_cur (current components) to the radial direction of station ABCD at each observation, or vice versa project radar vectors and find model at that point. The output might have columns like `radial_speed_observed` vs `radial_speed_model` for each grid cell and time, or direct vector component comparisons if we resolved vectors.
-
-After the mapping step, you will have **analysis-ready geospatial data**: time-series on a uniform grid. This can be ingested into analysis tools or further aggregated. Importantly, this script can also generate the STAC metadata for the dataset: if configured, it will create a STAC **Collection** (describing the dataset as a whole) and STAC **Items** for each time period or data file. Each STAC Item will include links to the Parquet asset(s) for that time and relevant metadata (station IDs used, variables, etc.), using the HF-EOLUS STAC specification[\[6\]][][\[7\]]. This allows the collection of mapped data to be easily cataloged and shared. The STAC files (JSON) might be written to an output folder alongside the Parquet. For example, you might see `collection.json` and an `items/` directory with per-day item JSONs.
-
-*(Under the hood, this script likely uses PySTAC to create the catalog entries programmatically. It populates fields like datetime, geospatial extent (using the grid bounds), and links each Parquet file. The STAC* *Table Extension* *may be used to describe the schema of the Parquet (so users know what columns like* `u_current` *mean), following the project's spec[\[6\]].)*\*
-
-### 4. Aggregation and Analysis
-
-*Script:* `aggregate_analysis.sh` -- **Aggregate mapped data and compute statistics or derived products.**
-
-**Description:** The final stage performs any higher-level aggregation or statistical analysis on the mapped dataset. Depending on the project goals, this could include: - Computing **spatial statistics**: e.g., averaging currents over a time window to get mean flow patterns, or calculating variance, etc., at each grid point. - Computing **temporal statistics**: e.g., time-series of bias between radar and model, skill metrics like RMSE, correlations at each point. - Creating **derived gridded products**: e.g., a map of the difference between radar and model averaged over a month, or a map of data coverage (how many observations per grid cell).
-
-This script likely reads the Parquet output from step 3 and performs group-by operations (using tools like Pandas or even DuckDB SQL) to summarize data. The results are then saved as new Parquet files (and possibly also as easy-to-visualize formats like CSV or GeoJSON for quick inspection).
-
-For example, one output might be a Parquet with one row per grid cell containing the mean and standard deviation of the current components over the time range. Another output could be a Parquet of time-series metrics (one row per timestamp containing domain-wide averages).
-
-**Outputs:** Depending on what is computed: - GeoParquet file of aggregated spatial data (geometry = grid cell, properties = statistics). For instance, `ABCD_currents_monthlyMean.parquet` with each grid point's monthly mean U and V. - CSV or Parquet of summary metrics (no geometry, just stats vs time or overall numbers). - Updated STAC catalog (if we produce new data products, we may add them as either new Collections or Items). If the aggregation yields a new layer (like "monthly mean currents"), a new STAC Item or Collection can be created for it. For simplicity, the script might just output data and not extend STAC (or it might update the existing catalog's collection to include links to the aggregated product as an additional asset or item).
-
-**Inputs:** - The mapped data Parquet from step 3 (`--input outputs/currents_202301.parquet` for example). - Parameters specifying what aggregation to do (e.g., `--temporal-average 1M` to average over 1 month, or `--spatial-window 5` to do some smoothing). - If comparing multiple datasets, inputs for those as well.
+- Output database for the mapping table, S3 bucket/prefix for Parquet data, and output table name.
+- Input data table with columns `rowid` and `geometry` (WKB), and the grid table from step 2 with `node_id` and `geometry`.
+- Optional per-table databases if your data and grid live in different Athena databases.
+- Search radius in kilometers (default 10), AWS CLI profile, and an optional log directory.
 
 **Usage Example:**
 
-    # Aggregate January 2023 currents to monthly mean and compute radar-model differences
-    bash scripts/aggregate_analysis.sh --input outputs/ABCD_vs_model.parquet \
-        --spatial-avg mean --temporal-avg 1M \
-        --output outputs/ABCD_Jan2023_stats.parquet
+    bash scripts/mapping/geo_mapping.sh \
+      --db-name geodata \
+      --data-table sensor_points \
+      --grid-table grid_nodes \
+      --bucket-name my-bucket \
+      --output-prefix mappings/sensor_points/ \
+      --output-table sensor_node_links \
+      --distance-km 5 \
+      --profile my-aws
 
-After running, suppose this produces `ABCD_Jan2023_stats.parquet` that contains for each grid cell: the mean radar current, mean model current, and their difference over January. The geometry column allows plotting these as maps (e.g., a map of bias where each grid cell is colored by difference). It may also output `ABCD_Jan2023_timeseries.csv` with overall RMSE per day.
+After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see `docs/grids.md`.
 
-Finally, if not already done in step 3, this stage can generate a **STAC catalog** or update it. Typically, if step 3 created a STAC Collection for the daily data, the aggregation script might create a new STAC Item (or Collection) for the aggregated result (e.g., an item representing the monthly average). The STAC metadata would document the processing (via STAC Processing Extension, perhaps) and link to the source data items. All STAC JSONs are written to a `stac/` directory in the output. You can validate the catalog using standard STAC validation tools or open it with a STAC browser to ensure it's correctly structured.
+### 4. Aggregation and Analysis
+
+*Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata.
+
+**Description:** With the grid from step 2 and the row→node links from step 3, this step summarizes numeric columns by time and `node_id`. The core script runs a CTAS in Athena joining the data table to the grid table through the mapping table, computing statistics such as mean, median, standard deviation, min/max, counts, and MAD for each selected column. The result is a Parquet dataset in S3 with an Athena table keyed by `timestamp`, `node_id`, and the node `geometry`; optionally partitioned by existing data columns.
+
+When angles are present (e.g., wind direction), the directional wrapper converts to sine/cosine before aggregation and reconstructs angles and circular dispersion afterwards. If you need to project a column onto the line from each node to a reference point (e.g., along-track/line-of-sight component), the projection wrapper applies that transform first and then delegates to the core.
+
+After the CTAS, the finalizer consolidates files (one per partition) and writes GeoParquet metadata so assets are self-describing in GIS tools and compatible with Athena.
+
+**Usage examples:**
+
+    # Aggregate columns by timestamp and node_id
+    bash scripts/aggregation/aggregate_core.sh \
+      --db-name geodata \
+      --data-table sensor_points \
+      --grid-table grid_nodes \
+      --mapping-table sensor_node_links \
+      --columns value1,value2 \
+      --bucket-name my-bucket \
+      --output-prefix aggregates/sensors/value12/ \
+      --output-table sensors_value12_by_node \
+      --partition-cols date \
+      --profile my-aws
+
+    # Directional variables (angles in degrees), optionally magnitude-weighted
+    bash scripts/aggregation/aggregate_direction_wrapper.sh \
+      --db-name geodata \
+      --data-table meteo_points \
+      --grid-table grid_nodes \
+      --mapping-table meteo_node_links \
+      --columns wind_speed,temperature,wind_dir_deg \
+      --direction-cols wind_dir_deg \
+      --magnitude-cols wind_speed \
+      --bucket-name my-bucket \
+      --output-prefix aggregates/meteo/wind/ \
+      --output-table meteo_wind_by_node \
+      --partition-cols date \
+      --profile my-aws
+
+    # Project a column toward a geographic point and aggregate
+    bash scripts/aggregation/aggregate_projection_wrapper.sh \
+      --db-name geodata \
+      --data-table radar_points \
+      --grid-table grid_nodes \
+      --mapping-table radar_node_links \
+      --columns backscatter \
+      --projection-col backscatter \
+      --point-lat 40.4168 --point-lon -3.7038 \
+      --bucket-name my-bucket \
+      --output-prefix aggregates/radar/proj_madrid/ \
+      --output-table radar_proj_by_node \
+      --profile my-aws
+
+    # Consolidate and add GeoParquet metadata (optional but recommended)
+    bash scripts/aggregation/finalize_geoparquet.sh \
+      --db-name geodata \
+      --bucket-name my-bucket \
+      --output-prefix aggregates/sensors/value12/ \
+      --output-table sensors_value12_by_node \
+      --partition-cols date \
+      --profile my-aws
+
+After aggregation you'll have a per-node time series ready for further analysis or publication. To package it as a portable STAC catalog, use `scripts/aggregation/build_stac_catalog.sh` to stage Parquet under `assets/` and generate `collection.json` and nested items.
 
 ## STAC Catalog and Data Specifications
 
