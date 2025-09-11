@@ -22,6 +22,10 @@ RUN python -m pip install --upgrade pip setuptools wheel
 RUN pip install --prefer-binary -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
+# Mitigate potential OpenBLAS CPU detection issues on some ARM SoCs (e.g., RPi)
+# This forces a safe generic ARMv8 kernel to avoid SIGILL on import of NumPy/Pandas
+ENV OPENBLAS_CORETYPE=ARMV8
+
 COPY app.py /app/app.py
 
 EXPOSE 8501

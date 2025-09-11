@@ -61,9 +61,14 @@ Ejemplos:
 
 ### Problemas conocidos y solución
 
-- Error 132 (Illegal instruction) al acceder a la app en algunas Raspberry Pi 64‑bit:
-  - Causa probable: la rueda de `pyarrow` para `aarch64` puede usar instrucciones no soportadas por ciertos SoC/CPU de ARM (p. ej., generaciones más antiguas) y provocar SIGILL al importarse.
-  - Mitigación: forzar el uso de `fastparquet` para leer Parquet/GeoParquet evitando importar `pyarrow`.
-  - Cómo: establecer la variable de entorno `PARQUET_ENGINE=fastparquet` al ejecutar el contenedor:
-    - `docker run -e PARQUET_ENGINE=fastparquet ... stac-browser`
-  - Notas: la imagen incluye `fastparquet`. Con esta opción se leerán Parquet/GeoParquet reconstruyendo la geometría desde WKB/WKT; si el CRS no está disponible en metadatos, se asume `EPSG:4326`.
+- Error 132 (Illegal instruction) en Raspberry Pi 64‑bit:
+  - Causa probable: alguna librería con extensiones nativas (NumPy/Pandas via OpenBLAS, o PyArrow) intenta usar instrucciones no soportadas por ciertos SoC ARM y produce SIGILL al importarse.
+  - Mitigación 1 (incluida por defecto en la imagen): forzar un kernel seguro de OpenBLAS
+    - La imagen define `OPENBLAS_CORETYPE=ARMV8`, que evita detección agresiva de CPU y reduce la probabilidad de SIGILL al importar NumPy/Pandas.
+  - Mitigación 2 (si el fallo está en PyArrow): forzar `fastparquet`
+    - Ejecuta con `-e PARQUET_ENGINE=fastparquet` o `-e DISABLE_PYARROW=1` para evitar importar `pyarrow`.
+  - Mitigación 3 (desactivar SIMD en Arrow, último recurso):
+    - Ejecuta con `-e ARROW_USER_SIMD_LEVEL=none` si sospechas que `pyarrow` provoca el SIGILL.
+  - Comandos de verificación:
+    - `docker run --rm --entrypoint python ghcr.io/GOFUVI/hf_eolus_stac_browser:latest -c "import numpy, pandas; print('np/pd ok')"`
+    - `docker run --rm --entrypoint python ghcr.io/GOFUVI/hf_eolus_stac_browser:latest -c "import pyarrow; print('pyarrow ok')"`
