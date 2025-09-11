@@ -14,12 +14,14 @@ RUN apt-get update \
         libgeos-dev \
         proj-bin libproj-dev \
         libspatialindex-dev \
+        python3-numpy python3-pandas \
     && rm -rf /var/lib/apt/lists/*
 
 # Prefer wheels to avoid source builds on non-amd64
 ENV PIP_NO_CACHE_DIR=1
 RUN python -m pip install --upgrade pip setuptools wheel
-RUN pip install --prefer-binary -r /tmp/requirements.txt \
+ENV PYTHONPATH=/usr/lib/python3/dist-packages:$PYTHONPATH
+RUN pip install --prefer-binary --upgrade-strategy only-if-needed -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
 # Mitigate potential OpenBLAS CPU detection issues on some ARM SoCs (e.g., RPi)
