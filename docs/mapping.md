@@ -174,3 +174,14 @@ Notes and edge cases:
 
 - Ensure `aws` and `jq` are available in the PATH.
 - The log file is written to `geo_mapping.sh.log` in the specified log directory.
+
+## Accuracy and trade‑offs
+
+- Distance model: The final filter computes `ST_Distance` after casting inputs to spherical geography. This evaluates great‑circle distance on a sphere with mean Earth radius (as in Trino/Athena geospatial functions). Implementations typically use the haversine or spherical law‑of‑cosines formulation.
+- Expected error: Compared with ellipsoidal WGS84 geodesics (e.g., Karney/Vincenty), spherical distances are usually very close for kilometer‑scale ranges—often meter‑level over ~10 km and commonly below ~0.1%—but errors grow for very long paths and near poles/antimeridian.
+- Why this choice: The spherical model scales efficiently to millions of evaluations inside Athena. The lat/lon window pre‑filter further reduces the number of `ST_Distance` calls, providing a good balance of precision and throughput for large joins.
+- Higher‑fidelity options: If you need ellipsoidal accuracy, post‑process candidates outside Athena using a geodesic library (e.g., GeographicLib/Karney), or reduce the search radius while compensating with a denser grid. Treat this as a precision vs. performance trade‑off.
+
+References:
+- Trino/Presto geospatial functions (spherical geography, ST_Distance): https://trino.io/docs/current/functions/geospatial.html
+- Karney (2013), Algorithms for geodesics on the ellipsoid (GeographicLib): https://geographiclib.sourceforge.io/geodesic.html
