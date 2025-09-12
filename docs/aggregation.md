@@ -145,6 +145,20 @@ All other options are the same as `aggregate_core.sh`.
   --profile my-aws
 ```
 
+### Mathematical details: circular statistics
+
+- Representation: An angle θ (degrees) is mapped to components (sin θ, cos θ). With optional magnitude weights w ≥ 0, use (w·sin θ, w·cos θ).
+- Aggregates: Compute scalar aggregates of these components (means, medians, stddev, MAD). Let (x̄, ȳ) denote the aggregated component means. The circular mean direction is μ = atan2(ȳ, x̄) (in degrees).
+- Resultant length and dispersion: The mean resultant length is ρ = √(x̄²+ȳ²) for unit weights; with weights, normalize by the mean weight w̄: ρ = √(x̄²+ȳ²)/w̄. A commonly used circular standard deviation is s = √(−2 ln ρ) (see Fisher 1993; Mardia & Jupp 2000). Larger s indicates greater angular spread.
+- Medians and MAD: The wrapper uses aggregated medians of sine/cosine and a MAD‑based analogue to characterize dispersion. This is a pragmatic surrogate for robust circular spread and aligns with the scalar aggregation framework. For rigorous circular medians/MAD, see directional statistics references.
+- Independence of magnitude vs direction: Scalar statistics of the magnitude columns (e.g., speed_mean, speed_stddev) are computed independently from the directional stats. When provided, magnitude acts only as a weight in the directional component aggregation; it does not couple the scalar magnitude summaries to the directional outputs.
+
+References:
+- Circular mean and dispersion: https://en.wikipedia.org/wiki/Circular_mean
+- Directional statistics overview: https://en.wikipedia.org/wiki/Directional_statistics
+- Fisher, N. I. (1993), Statistical Analysis of Circular Data.
+- Mardia, K. V., & Jupp, P. E. (2000), Directional Statistics.
+
 ## `aggregate_projection_wrapper.sh`
 
 Projects a single column onto the line from each grid node to a fixed geodetic point, then aggregates the projected values. Useful for along‑track/line‑of‑sight projections.
@@ -175,6 +189,13 @@ All other options are the same as `aggregate_core.sh`.
   --output-table radar_proj_by_node \
   --profile my-aws
 ```
+
+### Mathematical details: projection
+
+Given a value V at data point D (lon/lat) and grid node G (lon/lat), and a reference point P (lon/lat), the wrapper computes the component of V along the line from G to P using a planar approximation in longitude/latitude degrees. Let vectors u = P−D and v = P−G, with dot product u·v and norms |u|, |v|. The cosine of the angle between them is cos θ = (u·v)/(|u||v|), and the projected value is V·cos θ. This small‑angle approximation is suitable for local neighborhoods; for larger extents or high latitudes, project coordinates to a local metric CRS (e.g., UTM) and apply the same dot‑product formula.
+
+Reference:
+- Vector projection: https://en.wikipedia.org/wiki/Vector_projection
 
 ## `finalize_geoparquet.sh`
 
@@ -305,4 +326,3 @@ Direct use: `python scripts/aggregation/build_geo_catalog.py <output_root> --col
 - Safety checks prevent accidental deletion of bucket roots when pre‑cleaning S3 prefixes.
 - Ensure the data table has a `rowid` column and the mapping table provides `rowid -> node_id` pairs.
 - The grid table must contain `node_id` and a WKB `geometry` column; `finalize_geoparquet.sh` will add GeoParquet metadata so GIS tools recognize spatial extents/CRS.
-

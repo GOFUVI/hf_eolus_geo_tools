@@ -230,6 +230,11 @@ After the CTAS, the finalizer consolidates files (one per partition) and writes 
       --output-table radar_proj_by_node \
       --profile my-aws
 
+Math notes: projection and circular statistics
+
+- Projection (line-of-sight): For each row with value V at data point D and a grid node G, given a reference point P(lat, lon), the wrapper computes the cosine of the angle θ between vectors (P−D) and (P−G) using a planar dot product in degrees: cos θ = ((P−D)·(P−G)) / (|P−D||P−G|). The projected value is V·cos θ. This is a small‑angle, longitude/latitude plane approximation suited to local neighborhoods; for large extents or high latitudes, consider projecting to a local metric CRS (e.g., UTM) for the dot product[\[10\]][10].
+- Circular stats (directions in degrees): Map each direction θ to components (sin θ, cos θ). Optionally weight by a magnitude w (e.g., wind speed) to get (w·sin θ, w·cos θ). Aggregate these components with scalar means/medians. The circular mean direction is atan2(ȳ, x̄). The resultant length ρ = √(x̄²+ȳ²) (unweighted) or ρ = √(x̄²+ȳ²)/w̄ (weighted) yields a dispersion via the standard circular deviation s = √(−2 ln ρ)[\[8\]][8][\[9\]][9]. Scalar statistics of the magnitude (e.g., speed_mean, speed_stddev) are computed independently from the directional stats, even when the magnitude is used as a weight in the circular computations.
+
     # Consolidate and add GeoParquet metadata (optional but recommended)
     bash scripts/aggregation/finalize_geoparquet.sh \
       --db-name geodata \
@@ -374,6 +379,9 @@ This software is provided "as is", without warranty of any kind, express or impl
 - [Trino/Presto geospatial functions (spherical geography, ST_Distance)][5]
 - [Karney 2013: Algorithms for geodesics on the ellipsoid (GeographicLib)][6]
 - [Length of a degree (latitude/longitude)][7]
+- [Circular mean and dispersion][8]
+- [Directional statistics (overview)][9]
+- [Vector projection][10]
 
 [1]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/overview.md
 [2]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md
@@ -382,6 +390,9 @@ This software is provided "as is", without warranty of any kind, express or impl
 [5]: https://trino.io/docs/current/functions/geospatial.html
 [6]: https://geographiclib.sourceforge.io/geodesic.html
 [7]: https://en.wikipedia.org/wiki/Latitude#Length_of_a_degree
+[8]: https://en.wikipedia.org/wiki/Circular_mean
+[9]: https://en.wikipedia.org/wiki/Directional_statistics
+[10]: https://en.wikipedia.org/wiki/Vector_projection
 
 [docs/hulls.md]: docs/hulls.md
 [docs/grids.md]: docs/grids.md
