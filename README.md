@@ -161,6 +161,13 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
 
 After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see [docs/grids.md].
 
+Accuracy and trade‑offs
+
+- Distance model: Mapping casts both geometries to Trino/Athena’s spherical geography and evaluates `ST_Distance` (great‑circle distance on a sphere with mean Earth radius). Implementations typically use the haversine or related spherical law‑of‑cosines formulation[\[5\]][5].
+- Expected error: Relative to ellipsoidal WGS84 geodesics (e.g., Karney/Vincenty), spherical great‑circle distances are usually very close for kilometer‑scale ranges — on the order of meters over ~10 km, and commonly below ~0.1% — but errors increase for very long paths and near the poles/antimeridian[\[6\]][6].
+- Why this choice: The spherical model is SIMD‑friendly and scales well to millions of row‑node checks inside Athena. The query first does a fast lat/lon window pre‑filter to minimize the number of `ST_Distance` evaluations, then applies the geodesic test.
+- Higher‑fidelity options: If you require ellipsoidal accuracy, compute distances outside Athena using a geodesic library (e.g., GeographicLib/Karney) or reduce the search radius while compensating with a denser grid. Treat this as a precision vs. throughput trade‑off.
+
 ### 4. Aggregation and Analysis
 
 *Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata. For full usage and options, see [docs/aggregation.md].
@@ -356,11 +363,15 @@ This software is provided "as is", without warranty of any kind, express or impl
 - [GeoParquet spec][2]
 - [STAC spec][3]
 - [HF‑EOLUS GeoParquet and STAC spec repository (README)][4]
+- [Trino/Presto geospatial functions (spherical geography, ST_Distance)][5]
+- [Karney 2013: Algorithms for geodesics on the ellipsoid (GeographicLib)][6]
 
 [1]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/overview.md
 [2]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md
 [3]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/stac_specs.md
 [4]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/README.md
+[5]: https://trino.io/docs/current/functions/geospatial.html
+[6]: https://geographiclib.sourceforge.io/geodesic.html
 
 [docs/hulls.md]: docs/hulls.md
 [docs/grids.md]: docs/grids.md
