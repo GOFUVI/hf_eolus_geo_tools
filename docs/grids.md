@@ -129,6 +129,13 @@ python scripts/grids/create_grid_table.py \
 3. The resulting GeoParquet includes metadata compliant with the GeoParquet
    1.1.0 specification, enabling seamless use with GIS tools and Athena.
 
+## Grid origin and numbering
+
+- Start corner: The generator projects the hull’s bounding box to UTM, insets it by half the requested spacing, and starts at the lower‑left (south‑west) corner of that inset box. It then steps east (x) across a row and proceeds row by row northward (y).
+- ID assignment: `node_id` values are built as `<prefix><sequential_number>` following that row‑major order. No zero‑padding is applied by default.
+- Non‑consecutive numbers: After creating the full lattice inside the bounding box, points outside the actual hull polygon are filtered out. Because filtering happens after numbering, gaps remain in the numeric suffixes. Appending manual nodes (`--manual-csv`) or using append mode can also produce non‑consecutive IDs by design.
+- Implication: Treat `node_id` as a unique identifier, not as an ordering or coordinate proxy. For spatial ordering, sort by longitude/latitude (or geometry) instead of by `node_id`.
+
 ## Additional Notes
 
 - The scripts assume `aws`, `docker`, and `jq` are available in the PATH.

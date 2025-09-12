@@ -2,15 +2,15 @@
 
 ## Overview
 
-**HF-EOLUS Geospatial Processing Tools** is a set of command‑line scripts to transform and analyze large geospatial point datasets using cloud‑optimized formats. While born in the HF‑radar context, the utilities are generic: they operate on Athena tables that expose a binary `geometry` column and on prepared local files where applicable, and they produce GeoParquet assets with optional STAC metadata[1]. By leaning on open standards, the toolkit saves data in a **compact, analysis‑ready format** and describes it with **portable metadata**, so teams can use off‑the‑shelf analytics and quickly discover what they need.
+**HF-EOLUS Geospatial Processing Tools** is a set of command‑line scripts to transform and analyze large geospatial point datasets using cloud‑optimized formats. While born in the HF‑radar context, the utilities are generic: they operate on Athena tables that expose a binary `geometry` column and on prepared local files where applicable, and they produce GeoParquet assets with optional STAC metadata[\[1\]][1]. By leaning on open standards, the toolkit saves data in a **compact, analysis‑ready format** and describes it with **portable metadata**, so teams can use off‑the‑shelf analytics and quickly discover what they need.
 
 **What does this repository do?** It provides a step‑by‑step pipeline — implemented as shell scripts — to go from raw tabular geospatial data (e.g., sensor/model outputs or analytics results) to analysis‑ready assets. Key features include:
 
--   **GeoParquet Conversion:** All output datasets are stored as Parquet files with embedded geospatial information (coordinates, geometry, CRS, etc.) following the **GeoParquet v1.1** specification[2]. This format stores geometries (points, polygons, etc.) in a binary column (e.g. WKB) along with coordinate reference metadata, making the files self-describing and directly readable by GIS software. Using columnar Parquet yields highly compressed files and fast query performance for large datasets.
+-   **GeoParquet Conversion:** All output datasets are stored as Parquet files with embedded geospatial information (coordinates, geometry, CRS, etc.) following the **GeoParquet v1.1** specification[\[2\]][2]. This format stores geometries (points, polygons, etc.) in a binary column (e.g. WKB) along with coordinate reference metadata, making the files self-describing and directly readable by GIS software. Using columnar Parquet yields highly compressed files and fast query performance for large datasets.
 
--   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (JSON) describing the outputs. STAC indexes data by space, time, and properties[3]. Each product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** for organization. This enables interoperability with STAC‑compatible tools — users can search and access the data via common libraries (e.g., PySTAC) or STAC browsers instead of handling files manually.
+-   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (JSON) describing the outputs. STAC indexes data by space, time, and properties[\[3\]][3]. Each product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** for organization. This enables interoperability with STAC‑compatible tools — users can search and access the data via common libraries (e.g., PySTAC) or STAC browsers instead of handling files manually.
 
-By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and fit naturally alongside other geospatial datasets[1]. A single time slice from a dense sensor network can contain **tens of thousands of points**, and a few weeks can exceed **millions**[1] — far beyond what CSV handles efficiently. Converting to GeoParquet cuts storage and accelerates columnar queries, while STAC makes it easy to find observations by region and time without a separate database. In short, this toolkit provides an end‑to‑end path to standardize, store, and catalog geospatial point data for analysis.
+By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and fit naturally alongside other geospatial datasets[\[1\]][1]. A single time slice from a dense sensor network can contain **tens of thousands of points**, and a few weeks can exceed **millions**[\[1\]][1] — far beyond what CSV handles efficiently. Converting to GeoParquet cuts storage and accelerates columnar queries, while STAC makes it easy to find observations by region and time without a separate database. In short, this toolkit provides an end‑to‑end path to standardize, store, and catalog geospatial point data for analysis.
 
 ## Requirements
 
@@ -20,9 +20,9 @@ To use these scripts, you will need a Unix-like environment (Linux or macOS reco
 
 -   **Docker:** Required. All Python steps run in containers (e.g., `python:3.11-slim`) and install needed packages inside the container on the fly. You do not need to install Python, Shapely, PyArrow, etc. on the host.
 
--   **AWS CLI (optional):** Needed for steps that interact with S3/Athena (e.g., uploading data, creating tables). Configure with an AWS profile if you plan to use those features.
+-   **AWS CLI:** Required for the core pipeline that uses AWS services (Athena/S3/Glue): hulls, grid table creation to S3/Athena, mapping, aggregation and finalization. Optional only if you use local‑only utilities (viewers, local grid generation, local GeoParquet metadata, STAC from local dirs).
 
--   **jq (optional):** Some scripts parse AWS CLI JSON output locally and require `jq`.
+-   **jq:** Required when running mapping/aggregation/finalization scripts that parse AWS CLI JSON output. Optional for local‑only utilities.
 
 Ensure that command-line `bash` and coreutils are available (on most Linux/macOS they are by default).
 
@@ -37,17 +37,17 @@ Ensure that command-line `bash` and coreutils are available (on most Linux/macOS
 
 This will place the suite of scripts into `hf_eolus_geo_tools/scripts/` along with a `docs/` folder containing further documentation.
 
-1.  **Install Dependencies:** Ensure **Docker** is installed and available in your PATH. If you plan to use S3/Athena steps, also install and configure the **AWS CLI** (and `jq` if your OS doesn’t include it). No local Python installation is required.
+1.  **Install Dependencies:** Ensure **Docker** is installed and available in your PATH. To run the pipeline against AWS (Athena/S3/Glue), install and configure the **AWS CLI** and `jq`. If you only use local utilities (viewers, local grid/metadata), you may skip AWS CLI/`jq`. No local Python installation is required.
 
 Make sure you have `bash` and standard UNIX tools on your PATH. On macOS, you may need to install GNU versions of certain utilities (or use `brew install coreutils`) if differences arise, but generally the scripts aim to be portable.
 
-1.  **Configure Data Inputs:** Prepare the input data required for each step of the workflow (detailed below). Typically this means:
+1.  **Prepare Your Data:** The tools are dataset‑agnostic; any tabular point data can be processed. Depending on how you plan to run the pipeline:
 
-2.  For HF radar data: Gather the radar *radial metrics* files or their converted Parquet equivalents. If you have raw CODAR LLUV files, you might first run the HF Radial ingestion pipeline (in HF-EOLUS) to get Parquet files, or ensure the scripts can read the LLUV format directly (the current tools expect data in Parquet or CSV form).
+   - **AWS/Athena pipeline:** Ensure your source data is available as an Athena table with a binary WKB `geometry` column (WGS84/CRS84 recommended), a unique `rowid`, and the columns you want to aggregate (including an event time column such as `timestamp`). The scripts will compute a coverage hull from your points, create a grid table, map rows to grid nodes, and aggregate.
 
-3.  For model data (if using the grid/mapping with model output): Obtain the model output file(s) covering the region and time of interest (e.g., a NetCDF file of winds). Ensure you know the grid's projection or have latitude/longitude coordinates for grid points available.
+   - **Local utilities:** If you are working locally, prepare Parquet or CSV files with either a WKB geometry column or explicit `longitude, latitude` columns. You can generate a grid GeoParquet locally and visualize hulls/grids; aggregation and mapping steps are designed for Athena.
 
-Some configuration (like specifying station IDs, file paths, grid resolution, etc.) is done via command-line arguments to the scripts. It may be convenient to organize a folder for intermediate outputs (GeoParquet files) and final outputs (STAC catalog) prior to running the workflow.
+Organize folders for intermediate outputs (GeoParquet) and final products (e.g., a STAC catalog). Most configuration (paths, grid spacing, table names) is passed via command‑line flags.
 
 With the code in place and environment set up, you are ready to run the processing pipeline on your data.
 
@@ -59,7 +59,7 @@ The typical workflow is divided into four main stages, each performed by a dedic
 
 ### 1. Coverage Hull Generation
 
-*Script:* `scripts/hulls/convex_hulls.sh` — **Generate coverage hull polygons** from Athena tables.
+*Script:* `scripts/hulls/convex_hulls.sh` — **Generate coverage hull polygons** from Athena tables. For full usage and options, see [docs/hulls.md].
 
 **Description:** The first step delineates the geographic footprint of your input dataset. Starting from point geometries stored in one or more AWS Athena tables (each exposing a `geometry` column), the script computes a **convex hull** for each table and then combines them via union or intersection to produce a final footprint polygon. This approach gives a clean envelope around all observed points; if you need a tighter outline (concave hull), that would require a different tool outside this utility.
 
@@ -84,11 +84,18 @@ After this step, you will have a GeoJSON polygon that delineates the dataset's f
 
 ### 2. Grid Generation
 
-*Script:* `scripts/grids/create_grid_table.sh` — **Generate analysis grid points** within the coverage area and publish them as a GeoParquet-backed Athena table.
+*Script:* `scripts/grids/create_grid_table.sh` — **Generate analysis grid points** within the coverage area and publish them as a GeoParquet-backed Athena table. For full usage and options, see [docs/grids.md].
 
 **Description:** With the footprint from step 1 in hand (a GeoJSON hull), this step defines a regular grid of points covering that area. You control the spacing in kilometers and can optionally apply a buffer around the hull. Under the hood, a Dockerized Python helper builds a GeoParquet file, then the script uploads it to S3 and creates an Athena table with columns `node_id` and `geometry` (WKB, WGS84). The resulting grid becomes the spatial scaffold for mapping and aggregation.
 
 The primary mode uses a hull file to generate points constrained to the polygon; alternatively, you can provide a manual CSV of nodes (`node_id,longitude,latitude`) to use on its own or to augment the generated grid.
+
+Grid origin and numbering
+
+- Start corner: The generator projects the hull’s bounding box to UTM, insets it by half the requested spacing, and starts at the lower‑left (south‑west) corner of that inset box. It then steps east (x) and proceeds row by row northward (y).
+- ID assignment: `node_id` is built as `<prefix><sequential_number>` in that row‑major order. No zero‑padding is applied by default.
+- Why numbers aren’t consecutive: After creating the full lattice inside the bounding box, points outside the actual hull polygon are dropped. This filtering happens after numbering, so gaps appear in the numeric suffix. If you append manual nodes (`--manual-csv`) or run in `--mode append`, you can also end up with non‑consecutive IDs by design.
+- Implication: Treat `node_id` as a unique identifier, not as an ordering or coordinate proxy. For spatial ordering, sort by latitude/longitude (or geometry) rather than by `node_id` lexicographically.
 
 **Inputs:**
 
@@ -123,11 +130,11 @@ You can preview a local GeoParquet grid with the viewer:
 
     bash scripts/grids/view_grid.sh --input path/to/grid_nodes.parquet --output grid_map.html
 
-The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[2]. For option details, see `docs/grids.md`.
+The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[\[2\]][2]. For option details, see [docs/grids.md].
 
-### 3. Radar Data Mapping
+### 3. Data Mapping
 
-*Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius.
+*Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius. For full usage and options, see [docs/mapping.md].
 
 **Description:** This step connects your source data to the grid built in step 2 by finding, for each input row, nearby grid node(s) within a given distance. It runs a CTAS query in Athena that pre-filters candidates with a latitude/longitude window and then applies geodesic `ST_Distance` on spherical geographies. The result is a compact link table you can join with your data or grid to drive downstream aggregation and analysis. This utility is generic: it works with any Athena table that has a binary WKB `geometry` column and a unique `rowid`.
 
@@ -152,11 +159,26 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
       --distance-km 5 \
       --profile my-aws
 
-After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see `docs/grids.md`.
+After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see [docs/grids.md].
+
+Lat/Lon prefilter window
+
+- Window derivation: For each data point at latitude φ and a search radius r (km), the query computes a rectangular window in degrees using:
+  - Δlat ≈ r / 110.574
+  - Δlon ≈ r / (111.320 · cos φ)
+  These constants approximate kilometers per degree of latitude/longitude on WGS84; the longitude term shrinks with latitude. The window is intentionally generous to avoid false negatives, and the final geodesic filter removes any false positives.
+- Edge cases: Near the poles (|φ| → 90°), Δlon grows large; near the antimeridian (±180°), the simple BETWEEN check does not wrap, so very large windows may need care if the area straddles ±180°. For typical radii (≤ 10–25 km) away from these extremes, the prefilter is effective and fast. See also [\[7\]][7] for background on degree lengths.
+
+Accuracy and trade‑offs
+
+- Distance model: Mapping casts both geometries to Trino/Athena’s spherical geography and evaluates `ST_Distance` (great‑circle distance on a sphere with mean Earth radius). Implementations typically use the haversine or related spherical law‑of‑cosines formulation[\[5\]][5].
+- Expected error: Relative to ellipsoidal WGS84 geodesics (e.g., Karney/Vincenty), spherical great‑circle distances are usually very close for kilometer‑scale ranges — on the order of meters over ~10 km, and commonly below ~0.1% — but errors increase for very long paths and near the poles/antimeridian[\[6\]][6].
+- Why this choice: The spherical model is SIMD‑friendly and scales well to millions of row‑node checks inside Athena. The query first does a fast lat/lon window pre‑filter to minimize the number of `ST_Distance` evaluations, then applies the geodesic test.
+- Higher‑fidelity options: If you require ellipsoidal accuracy, compute distances outside Athena using a geodesic library (e.g., GeographicLib/Karney) or reduce the search radius while compensating with a denser grid. Treat this as a precision vs. throughput trade‑off.
 
 ### 4. Aggregation and Analysis
 
-*Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata.
+*Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata. For full usage and options, see [docs/aggregation.md].
 
 **Description:** With the grid from step 2 and the row→node links from step 3, this step summarizes numeric columns by time and `node_id`. The core script runs a CTAS in Athena joining the data table to the grid table through the mapping table, computing statistics such as mean, median, standard deviation, min/max, counts, and MAD for each selected column. The result is a Parquet dataset in S3 with an Athena table keyed by `timestamp`, `node_id`, and the node `geometry`; optionally partitioned by existing data columns.
 
@@ -208,6 +230,11 @@ After the CTAS, the finalizer consolidates files (one per partition) and writes 
       --output-table radar_proj_by_node \
       --profile my-aws
 
+Math notes: projection and circular statistics
+
+- Projection (line-of-sight): For each row with value V at data point D and a grid node G, given a reference point P(lat, lon), the wrapper computes the cosine of the angle θ between vectors (P−D) and (P−G) using a planar dot product in degrees: cos θ = ((P−D)·(P−G)) / (|P−D||P−G|). The projected value is V·cos θ. This is a small‑angle, longitude/latitude plane approximation suited to local neighborhoods; for large extents or high latitudes, consider projecting to a local metric CRS (e.g., UTM) for the dot product[\[10\]][10].
+- Circular stats (directions in degrees): Map each direction θ to components (sin θ, cos θ). Optionally weight by a magnitude w (e.g., wind speed) to get (w·sin θ, w·cos θ). Aggregate these components with scalar means/medians. The circular mean direction is atan2(ȳ, x̄). The resultant length ρ = √(x̄²+ȳ²) (unweighted) or ρ = √(x̄²+ȳ²)/w̄ (weighted) yields a dispersion via the standard circular deviation s = √(−2 ln ρ)[\[8\]][8][\[9\]][9]. Scalar statistics of the magnitude (e.g., speed_mean, speed_stddev) are computed independently from the directional stats, even when the magnitude is used as a weight in the circular computations.
+
     # Consolidate and add GeoParquet metadata (optional but recommended)
     bash scripts/aggregation/finalize_geoparquet.sh \
       --db-name geodata \
@@ -219,13 +246,24 @@ After the CTAS, the finalizer consolidates files (one per partition) and writes 
 
 After aggregation you'll have a per-node time series ready for further analysis or publication. To package it as a portable STAC catalog, use `scripts/aggregation/build_stac_catalog.sh` to stage Parquet under `assets/` and generate `collection.json` and nested items.
 
+Finalization details (consolidation)
+
+- Why consolidate: CTAS jobs often emit many small files per partition, which hurts Athena/Presto performance (small‑files problem) and makes downstream tools slower. Consolidation rewrites the dataset so each partition directory contains exactly one Parquet file.
+- What happens under the hood: The script syncs the dataset from S3 to a temporary local dir, runs a Dockerized Python step that:
+  - merges files per partition using PyArrow (`merge_parquet.py`) into `value.parquet` for directories of the form `key=value/` and `data.parquet` otherwise;
+  - patches each file with GeoParquet metadata (`add_geoparquet_metadata.py`), declaring encoding (WKB/WKT), CRS (CRS84 by default), geometry types and a dataset bbox.
+  It then syncs back to the same S3 prefix (excluding Athena `*_athena*` and `query_results/` folders). If `--partition-cols` is provided, it runs `MSCK REPAIR TABLE` so Glue discovers the final partition layout.
+- Geometry column: Use `--geometry-column` if your geometry field is not `geometry`. Metadata is written to the Parquet file’s `geo` block so GIS/GeoPandas can open it directly and Athena can recognize geo semantics.
+- Safety and space: The process rewrites objects under the target prefix (with `--delete` on sync back). Ensure no concurrent writers. You need enough local disk to hold a copy of the dataset during the merge; the temporary working dir lives under `--log-dir`.
+- Region and logs: The script runs with region `eu-west-3` by default and logs all steps under `--log-dir` as `<script>_<table>.log`, plus the SQL used for partition repair when applicable. See [docs/aggregation.md] for more.
+
 ## STAC Catalog and Data Specifications
 
-Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[4]. In short:
+Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[\[4\]][4]. In short:
 
-- **GeoParquet (OGC v1.1):** Parquet with a `geo` metadata block describing geometry columns and CRS. We store geometries in WKB (typically column `geometry`) with WGS84/CRS84; files are self‑describing and open directly in GIS/GeoPandas. Columnar storage yields compact size and fast, selective reads[2].
+- **GeoParquet (OGC v1.1):** Parquet with a `geo` metadata block describing geometry columns and CRS. We store geometries in WKB (typically column `geometry`) with WGS84/CRS84; files are self‑describing and open directly in GIS/GeoPandas. Columnar storage yields compact size and fast, selective reads[\[2\]][2].
 
-- **STAC 1.0 + Table Extension:** Static JSON catalog describing Parquet assets. Structure: Catalog → Collections → Items. Each Item has a geometry (e.g., footprint or grid extent), datetime, and links to one or more Parquet assets; the Table Extension lists schema columns so users understand fields without opening files[3]. Works with STAC Browser and PySTAC.
+- **STAC 1.0 + Table Extension:** Static JSON catalog describing Parquet assets. Structure: Catalog → Collections → Items. Each Item has a geometry (e.g., footprint or grid extent), datetime, and links to one or more Parquet assets; the Table Extension lists schema columns so users understand fields without opening files[\[3\]][3]. Works with STAC Browser and PySTAC.
 
 - **How we apply it:** Every Parquet produced (hulls, grids, mappings, aggregates) can be registered as an Item asset; aggregated products may form their own Collections or Items. Catalogs are portable and can be hosted anywhere as static files.
 
@@ -324,14 +362,14 @@ You now have analysis‑ready HF‑radar statistics per grid node, stored as Geo
 
 This repository provides a concise, script-driven workflow to turn large geospatial point datasets and related model/sensor outputs into analysis‑ready assets. Following the steps above, you can go from delineating coverage areas, building analysis grids, and linking rows to grid nodes, to producing aggregated products and optional STAC catalogs. The focus on open standards keeps results portable and efficient: GeoParquet for compact, self‑describing storage and STAC for discoverability and interoperability.
 
-For details on the underlying conventions, see the HF‑EOLUS specification repository[4]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
+For details on the underlying conventions, see the HF‑EOLUS specification repository[\[4\]][4]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
 
 ## Utility Documentation
 
-- Hulls: docs/hulls.md
-- Grids: docs/grids.md
-- Mapping: docs/mapping.md
-- Aggregation: docs/aggregation.md
+- Hulls: [docs/hulls.md]
+- Grids: [docs/grids.md]
+- Mapping: [docs/mapping.md]
+- Aggregation: [docs/aggregation.md]
 
 ## Acknowledgements
 
@@ -345,23 +383,32 @@ This software is provided "as is", without warranty of any kind, express or impl
 
 ## References
 
-[1] overview.md
+- [Overview][1]
+- [GeoParquet spec][2]
+- [STAC spec][3]
+- [HF‑EOLUS GeoParquet and STAC spec repository (README)][4]
+- [Trino/Presto geospatial functions (spherical geography, ST_Distance)][5]
+- [Karney 2013: Algorithms for geodesics on the ellipsoid (GeographicLib)][6]
+- [Length of a degree (latitude/longitude)][7]
+- [Circular mean and dispersion][8]
+- [Directional statistics (overview)][9]
+- [Vector projection][10]
 
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/overview.md>
+[1]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/overview.md
+[2]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md
+[3]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/stac_specs.md
+[4]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/README.md
+[5]: https://trino.io/docs/current/functions/geospatial.html
+[6]: https://geographiclib.sourceforge.io/geodesic.html
+[7]: https://en.wikipedia.org/wiki/Latitude#Length_of_a_degree
+[8]: https://en.wikipedia.org/wiki/Circular_mean
+[9]: https://en.wikipedia.org/wiki/Directional_statistics
+[10]: https://en.wikipedia.org/wiki/Vector_projection
 
-[2] geoparquet_specs.md
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md>
-
-[3] stac_specs.md
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/stac_specs.md>
-
-[4] HF‑EOLUS GeoParquet and STAC specification repository (README)
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/README.md>
-
-[HF-EOLUS GeoParquet and STAC specification repository]: https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs
+[docs/hulls.md]: docs/hulls.md
+[docs/grids.md]: docs/grids.md
+[docs/mapping.md]: docs/mapping.md
+[docs/aggregation.md]: docs/aggregation.md
 
 ---
 <p align="center">
