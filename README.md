@@ -59,7 +59,7 @@ The typical workflow is divided into four main stages, each performed by a dedic
 
 ### 1. Coverage Hull Generation
 
-*Script:* `scripts/hulls/convex_hulls.sh` — **Generate coverage hull polygons** from Athena tables.
+*Script:* `scripts/hulls/convex_hulls.sh` — **Generate coverage hull polygons** from Athena tables. For full usage and options, see [docs/hulls.md].
 
 **Description:** The first step delineates the geographic footprint of your input dataset. Starting from point geometries stored in one or more AWS Athena tables (each exposing a `geometry` column), the script computes a **convex hull** for each table and then combines them via union or intersection to produce a final footprint polygon. This approach gives a clean envelope around all observed points; if you need a tighter outline (concave hull), that would require a different tool outside this utility.
 
@@ -84,7 +84,7 @@ After this step, you will have a GeoJSON polygon that delineates the dataset's f
 
 ### 2. Grid Generation
 
-*Script:* `scripts/grids/create_grid_table.sh` — **Generate analysis grid points** within the coverage area and publish them as a GeoParquet-backed Athena table.
+*Script:* `scripts/grids/create_grid_table.sh` — **Generate analysis grid points** within the coverage area and publish them as a GeoParquet-backed Athena table. For full usage and options, see [docs/grids.md].
 
 **Description:** With the footprint from step 1 in hand (a GeoJSON hull), this step defines a regular grid of points covering that area. You control the spacing in kilometers and can optionally apply a buffer around the hull. Under the hood, a Dockerized Python helper builds a GeoParquet file, then the script uploads it to S3 and creates an Athena table with columns `node_id` and `geometry` (WKB, WGS84). The resulting grid becomes the spatial scaffold for mapping and aggregation.
 
@@ -127,7 +127,7 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
 
 ### 3. Data Mapping
 
-*Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius.
+*Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius. For full usage and options, see [docs/mapping.md].
 
 **Description:** This step connects your source data to the grid built in step 2 by finding, for each input row, nearby grid node(s) within a given distance. It runs a CTAS query in Athena that pre-filters candidates with a latitude/longitude window and then applies geodesic `ST_Distance` on spherical geographies. The result is a compact link table you can join with your data or grid to drive downstream aggregation and analysis. This utility is generic: it works with any Athena table that has a binary WKB `geometry` column and a unique `rowid`.
 
@@ -156,7 +156,7 @@ After this step, you have a table of row-to-node links ready for analysis. For g
 
 ### 4. Aggregation and Analysis
 
-*Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata.
+*Scripts:* `scripts/aggregation/aggregate_core.sh` (core), with optional wrappers `aggregate_direction_wrapper.sh` (directional variables) and `aggregate_projection_wrapper.sh` (projection toward a point), plus `finalize_geoparquet.sh` to consolidate and add GeoParquet metadata. For full usage and options, see [docs/aggregation.md].
 
 **Description:** With the grid from step 2 and the row→node links from step 3, this step summarizes numeric columns by time and `node_id`. The core script runs a CTAS in Athena joining the data table to the grid table through the mapping table, computing statistics such as mean, median, standard deviation, min/max, counts, and MAD for each selected column. The result is a Parquet dataset in S3 with an Athena table keyed by `timestamp`, `node_id`, and the node `geometry`; optionally partitioned by existing data columns.
 
