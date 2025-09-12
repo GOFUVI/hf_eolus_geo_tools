@@ -246,6 +246,17 @@ Math notes: projection and circular statistics
 
 After aggregation you'll have a per-node time series ready for further analysis or publication. To package it as a portable STAC catalog, use `scripts/aggregation/build_stac_catalog.sh` to stage Parquet under `assets/` and generate `collection.json` and nested items.
 
+Finalization details (consolidation)
+
+- Why consolidate: CTAS jobs often emit many small files per partition, which hurts Athena/Presto performance (small‑files problem) and makes downstream tools slower. Consolidation rewrites the dataset so each partition directory contains exactly one Parquet file.
+- What happens under the hood: The script syncs the dataset from S3 to a temporary local dir, runs a Dockerized Python step that:
+  - merges files per partition using PyArrow (`merge_parquet.py`) into `value.parquet` for directories of the form `key=value/` and `data.parquet` otherwise;
+  - patches each file with GeoParquet metadata (`add_geoparquet_metadata.py`), declaring encoding (WKB/WKT), CRS (CRS84 by default), geometry types and a dataset bbox.
+  It then syncs back to the same S3 prefix (excluding Athena `*_athena*` and `query_results/` folders). If `--partition-cols` is provided, it runs `MSCK REPAIR TABLE` so Glue discovers the final partition layout.
+- Geometry column: Use `--geometry-column` if your geometry field is not `geometry`. Metadata is written to the Parquet file’s `geo` block so GIS/GeoPandas can open it directly and Athena can recognize geo semantics.
+- Safety and space: The process rewrites objects under the target prefix (with `--delete` on sync back). Ensure no concurrent writers. You need enough local disk to hold a copy of the dataset during the merge; the temporary working dir lives under `--log-dir`.
+- Region and logs: The script runs with region `eu-west-3` by default and logs all steps under `--log-dir` as `<script>_<table>.log`, plus the SQL used for partition repair when applicable. See [docs/aggregation.md] for more.
+
 ## STAC Catalog and Data Specifications
 
 Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[\[4\]][4]. In short:

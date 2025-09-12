@@ -199,7 +199,7 @@ Reference:
 
 ## `finalize_geoparquet.sh`
 
-Consolidates the output dataset into one Parquet file per partition directory and writes GeoParquet metadata. Optionally repairs Glue partitions.
+Consolidates the output dataset into one Parquet file per partition directory and writes GeoParquet metadata. Optionally repairs Glue partitions. This step mitigates the small‑files problem and improves scan efficiency in Athena/Presto and downstream tools.
 
 ### Options
 
@@ -236,11 +236,24 @@ Consolidates the output dataset into one Parquet file per partition directory an
   --profile my-aws
 ```
 
-Behavior:
+Behavior (step‑by‑step):
 
-- Downloads the dataset from S3 (excluding Athena result folders) to a temp dir.
-- Runs `merge_parquet.py` to ensure one file per partition directory and `add_geoparquet_metadata.py` to add GeoParquet metadata (encoding auto‑detected: WKB/WKT).
-- Syncs back to S3 and, if `--partition-cols` is set, runs `MSCK REPAIR TABLE`.
+- Sync down: Downloads the dataset from `s3://<bucket>/<prefix>` to a temporary working directory under `--log-dir` (excludes `query_results/*` and `*_athena*/*`). Aborts if no data files are found to avoid accidental deletion.
+- Merge per partition: Runs a Dockerized Python step that executes `merge_parquet.py` (PyArrow) to produce exactly one file per directory:
+  - Partitioned datasets (Hive style, `key=value/`): emits `value.parquet` in each partition directory.
+  - Non‑partitioned datasets: emits a single `data.parquet` at the root.
+  Files are merged without re‑partitioning the schema; ordering is not guaranteed and should not be relied upon for time series.
+- Add GeoParquet metadata: Executes `add_geoparquet_metadata.py` to write the `geo` metadata block into each file:
+  - Declares `primary_column` (default `geometry`, configurable via `--geometry-column`).
+  - Sets `encoding` (WKB or WKT, auto‑detected), `geometry_types`, CRS (CRS84), and a dataset/partition bbox computed robustly.
+- Sync up and repair: Syncs the working directory back to S3 with `--delete` to replace small files. If `--partition-cols` is provided, runs `MSCK REPAIR TABLE <db>.<table>` so Glue discovers the final partition layout.
+
+Practical notes:
+
+- Space and safety: Finalization rewrites objects under the target prefix. Ensure no concurrent writers and that you have sufficient local disk space (roughly the dataset size) for the temporary copy.
+- Performance: Consolidation significantly reduces per‑query file open/close overhead in Athena/Presto, often cutting costs and latency for wide scans.
+- Geometry column name: Use `--geometry-column` if your geometry field is not `geometry`.
+- Region and logs: Uses region `eu-west-3` by default; logs are written to `<script>_<table>.log` under `--log-dir`.
 
 ## Utilities
 
