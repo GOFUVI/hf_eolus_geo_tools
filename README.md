@@ -2,15 +2,15 @@
 
 ## Overview
 
-**HF-EOLUS Geospatial Processing Tools** is a set of command‑line scripts to transform and analyze large geospatial point datasets using cloud‑optimized formats. While born in the HF‑radar context, the utilities are generic: they operate on Athena tables that expose a binary `geometry` column and on prepared local files where applicable, and they produce GeoParquet assets with optional STAC metadata[1]. By leaning on open standards, the toolkit saves data in a **compact, analysis‑ready format** and describes it with **portable metadata**, so teams can use off‑the‑shelf analytics and quickly discover what they need.
+**HF-EOLUS Geospatial Processing Tools** is a set of command‑line scripts to transform and analyze large geospatial point datasets using cloud‑optimized formats. While born in the HF‑radar context, the utilities are generic: they operate on Athena tables that expose a binary `geometry` column and on prepared local files where applicable, and they produce GeoParquet assets with optional STAC metadata[\[1\]][1]. By leaning on open standards, the toolkit saves data in a **compact, analysis‑ready format** and describes it with **portable metadata**, so teams can use off‑the‑shelf analytics and quickly discover what they need.
 
 **What does this repository do?** It provides a step‑by‑step pipeline — implemented as shell scripts — to go from raw tabular geospatial data (e.g., sensor/model outputs or analytics results) to analysis‑ready assets. Key features include:
 
--   **GeoParquet Conversion:** All output datasets are stored as Parquet files with embedded geospatial information (coordinates, geometry, CRS, etc.) following the **GeoParquet v1.1** specification[2]. This format stores geometries (points, polygons, etc.) in a binary column (e.g. WKB) along with coordinate reference metadata, making the files self-describing and directly readable by GIS software. Using columnar Parquet yields highly compressed files and fast query performance for large datasets.
+-   **GeoParquet Conversion:** All output datasets are stored as Parquet files with embedded geospatial information (coordinates, geometry, CRS, etc.) following the **GeoParquet v1.1** specification[\[2\]][2]. This format stores geometries (points, polygons, etc.) in a binary column (e.g. WKB) along with coordinate reference metadata, making the files self-describing and directly readable by GIS software. Using columnar Parquet yields highly compressed files and fast query performance for large datasets.
 
--   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (JSON) describing the outputs. STAC indexes data by space, time, and properties[3]. Each product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** for organization. This enables interoperability with STAC‑compatible tools — users can search and access the data via common libraries (e.g., PySTAC) or STAC browsers instead of handling files manually.
+-   **STAC Catalog Metadata:** The toolkit can generate a static **STAC catalog** (JSON) describing the outputs. STAC indexes data by space, time, and properties[\[3\]][3]. Each product (or time step) becomes a STAC **Item** with links to the Parquet asset, and Items are grouped into **Collections** for organization. This enables interoperability with STAC‑compatible tools — users can search and access the data via common libraries (e.g., PySTAC) or STAC browsers instead of handling files manually.
 
-By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and fit naturally alongside other geospatial datasets[1]. A single time slice from a dense sensor network can contain **tens of thousands of points**, and a few weeks can exceed **millions**[1] — far beyond what CSV handles efficiently. Converting to GeoParquet cuts storage and accelerates columnar queries, while STAC makes it easy to find observations by region and time without a separate database. In short, this toolkit provides an end‑to‑end path to standardize, store, and catalog geospatial point data for analysis.
+By adopting GeoParquet for storage and STAC for metadata, these tools avoid custom formats and fit naturally alongside other geospatial datasets[\[1\]][1]. A single time slice from a dense sensor network can contain **tens of thousands of points**, and a few weeks can exceed **millions**[\[1\]][1] — far beyond what CSV handles efficiently. Converting to GeoParquet cuts storage and accelerates columnar queries, while STAC makes it easy to find observations by region and time without a separate database. In short, this toolkit provides an end‑to‑end path to standardize, store, and catalog geospatial point data for analysis.
 
 ## Requirements
 
@@ -123,7 +123,7 @@ You can preview a local GeoParquet grid with the viewer:
 
     bash scripts/grids/view_grid.sh --input path/to/grid_nodes.parquet --output grid_map.html
 
-The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[2]. For option details, see [docs/grids.md].
+The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[\[2\]][2]. For option details, see [docs/grids.md].
 
 ### 3. Data Mapping
 
@@ -221,11 +221,11 @@ After aggregation you'll have a per-node time series ready for further analysis 
 
 ## STAC Catalog and Data Specifications
 
-Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[4]. In short:
+Outputs follow the **HF‑EOLUS GeoParquet and STAC conventions**[\[4\]][4]. In short:
 
-- **GeoParquet (OGC v1.1):** Parquet with a `geo` metadata block describing geometry columns and CRS. We store geometries in WKB (typically column `geometry`) with WGS84/CRS84; files are self‑describing and open directly in GIS/GeoPandas. Columnar storage yields compact size and fast, selective reads[2].
+- **GeoParquet (OGC v1.1):** Parquet with a `geo` metadata block describing geometry columns and CRS. We store geometries in WKB (typically column `geometry`) with WGS84/CRS84; files are self‑describing and open directly in GIS/GeoPandas. Columnar storage yields compact size and fast, selective reads[\[2\]][2].
 
-- **STAC 1.0 + Table Extension:** Static JSON catalog describing Parquet assets. Structure: Catalog → Collections → Items. Each Item has a geometry (e.g., footprint or grid extent), datetime, and links to one or more Parquet assets; the Table Extension lists schema columns so users understand fields without opening files[3]. Works with STAC Browser and PySTAC.
+- **STAC 1.0 + Table Extension:** Static JSON catalog describing Parquet assets. Structure: Catalog → Collections → Items. Each Item has a geometry (e.g., footprint or grid extent), datetime, and links to one or more Parquet assets; the Table Extension lists schema columns so users understand fields without opening files[\[3\]][3]. Works with STAC Browser and PySTAC.
 
 - **How we apply it:** Every Parquet produced (hulls, grids, mappings, aggregates) can be registered as an Item asset; aggregated products may form their own Collections or Items. Catalogs are portable and can be hosted anywhere as static files.
 
@@ -324,7 +324,7 @@ You now have analysis‑ready HF‑radar statistics per grid node, stored as Geo
 
 This repository provides a concise, script-driven workflow to turn large geospatial point datasets and related model/sensor outputs into analysis‑ready assets. Following the steps above, you can go from delineating coverage areas, building analysis grids, and linking rows to grid nodes, to producing aggregated products and optional STAC catalogs. The focus on open standards keeps results portable and efficient: GeoParquet for compact, self‑describing storage and STAC for discoverability and interoperability.
 
-For details on the underlying conventions, see the HF‑EOLUS specification repository[4]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
+For details on the underlying conventions, see the HF‑EOLUS specification repository[\[4\]][4]. If questions arise, consult the `docs/` folder for per‑script guides or reach out to the maintainers. We hope these tools help teams across domains — environmental monitoring, earth observation, mobility, and beyond — work more easily with cloud‑native geospatial data.
 
 ## Utility Documentation
 
