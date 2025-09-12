@@ -90,6 +90,13 @@ After this step, you will have a GeoJSON polygon that delineates the dataset's f
 
 The primary mode uses a hull file to generate points constrained to the polygon; alternatively, you can provide a manual CSV of nodes (`node_id,longitude,latitude`) to use on its own or to augment the generated grid.
 
+Grid origin and numbering
+
+- Start corner: The generator projects the hull’s bounding box to UTM, insets it by half the requested spacing, and starts at the lower‑left (south‑west) corner of that inset box. It then steps east (x) and proceeds row by row northward (y).
+- ID assignment: `node_id` is built as `<prefix><sequential_number>` in that row‑major order. No zero‑padding is applied by default.
+- Why numbers aren’t consecutive: After creating the full lattice inside the bounding box, points outside the actual hull polygon are dropped. This filtering happens after numbering, so gaps appear in the numeric suffix. If you append manual nodes (`--manual-csv`) or run in `--mode append`, you can also end up with non‑consecutive IDs by design.
+- Implication: Treat `node_id` as a unique identifier, not as an ordering or coordinate proxy. For spatial ordering, sort by latitude/longitude (or geometry) rather than by `node_id` lexicographically.
+
 **Inputs:**
 
 - AWS profile, database, output table name, S3 path for the grid dataset, and an S3 location for Athena query results.
