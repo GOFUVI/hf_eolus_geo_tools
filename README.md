@@ -20,9 +20,9 @@ To use these scripts, you will need a Unix-like environment (Linux or macOS reco
 
 -   **Docker:** Required. All Python steps run in containers (e.g., `python:3.11-slim`) and install needed packages inside the container on the fly. You do not need to install Python, Shapely, PyArrow, etc. on the host.
 
--   **AWS CLI (optional):** Needed for steps that interact with S3/Athena (e.g., uploading data, creating tables). Configure with an AWS profile if you plan to use those features.
+-   **AWS CLI:** Required for the core pipeline that uses AWS services (Athena/S3/Glue): hulls, grid table creation to S3/Athena, mapping, aggregation and finalization. Optional only if you use local‑only utilities (viewers, local grid generation, local GeoParquet metadata, STAC from local dirs).
 
--   **jq (optional):** Some scripts parse AWS CLI JSON output locally and require `jq`.
+-   **jq:** Required when running mapping/aggregation/finalization scripts that parse AWS CLI JSON output. Optional for local‑only utilities.
 
 Ensure that command-line `bash` and coreutils are available (on most Linux/macOS they are by default).
 
@@ -37,17 +37,17 @@ Ensure that command-line `bash` and coreutils are available (on most Linux/macOS
 
 This will place the suite of scripts into `hf_eolus_geo_tools/scripts/` along with a `docs/` folder containing further documentation.
 
-1.  **Install Dependencies:** Ensure **Docker** is installed and available in your PATH. If you plan to use S3/Athena steps, also install and configure the **AWS CLI** (and `jq` if your OS doesn’t include it). No local Python installation is required.
+1.  **Install Dependencies:** Ensure **Docker** is installed and available in your PATH. To run the pipeline against AWS (Athena/S3/Glue), install and configure the **AWS CLI** and `jq`. If you only use local utilities (viewers, local grid/metadata), you may skip AWS CLI/`jq`. No local Python installation is required.
 
 Make sure you have `bash` and standard UNIX tools on your PATH. On macOS, you may need to install GNU versions of certain utilities (or use `brew install coreutils`) if differences arise, but generally the scripts aim to be portable.
 
-1.  **Configure Data Inputs:** Prepare the input data required for each step of the workflow (detailed below). Typically this means:
+1.  **Prepare Your Data:** The tools are dataset‑agnostic; any tabular point data can be processed. Depending on how you plan to run the pipeline:
 
-2.  For HF radar data: Gather the radar *radial metrics* files or their converted Parquet equivalents. If you have raw CODAR LLUV files, you might first run the HF Radial ingestion pipeline (in HF-EOLUS) to get Parquet files, or ensure the scripts can read the LLUV format directly (the current tools expect data in Parquet or CSV form).
+   - **AWS/Athena pipeline:** Ensure your source data is available as an Athena table with a binary WKB `geometry` column (WGS84/CRS84 recommended), a unique `rowid`, and the columns you want to aggregate (including an event time column such as `timestamp`). The scripts will compute a coverage hull from your points, create a grid table, map rows to grid nodes, and aggregate.
 
-3.  For model data (if using the grid/mapping with model output): Obtain the model output file(s) covering the region and time of interest (e.g., a NetCDF file of winds). Ensure you know the grid's projection or have latitude/longitude coordinates for grid points available.
+   - **Local utilities:** If you are working locally, prepare Parquet or CSV files with either a WKB geometry column or explicit `longitude, latitude` columns. You can generate a grid GeoParquet locally and visualize hulls/grids; aggregation and mapping steps are designed for Athena.
 
-Some configuration (like specifying station IDs, file paths, grid resolution, etc.) is done via command-line arguments to the scripts. It may be convenient to organize a folder for intermediate outputs (GeoParquet files) and final outputs (STAC catalog) prior to running the workflow.
+Organize folders for intermediate outputs (GeoParquet) and final products (e.g., a STAC catalog). Most configuration (paths, grid spacing, table names) is passed via command‑line flags.
 
 With the code in place and environment set up, you are ready to run the processing pipeline on your data.
 
@@ -125,7 +125,7 @@ You can preview a local GeoParquet grid with the viewer:
 
 The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[2]. For option details, see [docs/grids.md].
 
-### 3. Radar Data Mapping
+### 3. Data Mapping
 
 *Script:* `scripts/mapping/geo_mapping.sh` — **Link dataset rows to grid nodes** within a configurable search radius.
 
