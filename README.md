@@ -161,6 +161,14 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
 
 After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see [docs/grids.md].
 
+Lat/Lon prefilter window
+
+- Window derivation: For each data point at latitude φ and a search radius r (km), the query computes a rectangular window in degrees using:
+  - Δlat ≈ r / 110.574
+  - Δlon ≈ r / (111.320 · cos φ)
+  These constants approximate kilometers per degree of latitude/longitude on WGS84; the longitude term shrinks with latitude. The window is intentionally generous to avoid false negatives, and the final geodesic filter removes any false positives.
+- Edge cases: Near the poles (|φ| → 90°), Δlon grows large; near the antimeridian (±180°), the simple BETWEEN check does not wrap, so very large windows may need care if the area straddles ±180°. For typical radii (≤ 10–25 km) away from these extremes, the prefilter is effective and fast. See also [\[7\]][7] for background on degree lengths.
+
 Accuracy and trade‑offs
 
 - Distance model: Mapping casts both geometries to Trino/Athena’s spherical geography and evaluates `ST_Distance` (great‑circle distance on a sphere with mean Earth radius). Implementations typically use the haversine or related spherical law‑of‑cosines formulation[\[5\]][5].
@@ -365,6 +373,7 @@ This software is provided "as is", without warranty of any kind, express or impl
 - [HF‑EOLUS GeoParquet and STAC spec repository (README)][4]
 - [Trino/Presto geospatial functions (spherical geography, ST_Distance)][5]
 - [Karney 2013: Algorithms for geodesics on the ellipsoid (GeographicLib)][6]
+- [Length of a degree (latitude/longitude)][7]
 
 [1]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/overview.md
 [2]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md
@@ -372,6 +381,7 @@ This software is provided "as is", without warranty of any kind, express or impl
 [4]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/README.md
 [5]: https://trino.io/docs/current/functions/geospatial.html
 [6]: https://geographiclib.sourceforge.io/geodesic.html
+[7]: https://en.wikipedia.org/wiki/Latitude#Length_of_a_degree
 
 [docs/hulls.md]: docs/hulls.md
 [docs/grids.md]: docs/grids.md

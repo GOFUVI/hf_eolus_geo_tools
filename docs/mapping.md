@@ -150,6 +150,20 @@ WHERE ST_Distance(
 - `candidates` uses the bounding box to pre-select grid nodes near each data point, reducing distance calculations.
 - The final `SELECT` applies `ST_Distance` on spherical geographies to keep only rows within the requested radius.
 
+### Latitude/Longitude prefilter window
+
+To limit the number of distance computations, the query first bounds candidate nodes inside a lat/lon rectangle around each data point. For a radius `r_km` and data latitude `φ` (in degrees), the window half‑sizes are:
+
+- `delta_lat = r_km / 110.574`
+- `delta_lon = r_km / (111.320 * cos(radians(φ)))`
+
+These constants approximate kilometers per degree on the WGS84 ellipsoid; the longitude scale shrinks with latitude. The rectangle is intentionally generous so that true neighbors aren’t excluded; any false positives are removed by the final geodesic filter.
+
+Notes and edge cases:
+- Near the poles (|φ| → 90°), `delta_lon` grows; for very large radii and high latitudes, the window can span many degrees.
+- The BETWEEN predicates do not wrap the antimeridian; if the search area straddles ±180°, consider smaller radii or pre‑filtering by longitude ranges.
+- The final filter uses `ST_Distance` over spherical geography (great‑circle distance), which scales to large datasets; use an ellipsoidal library offline if you need sub‑meter geodesics.
+
 ## Details
 
 1. The script runs in region `eu-west-3` and logs all AWS CLI calls.
