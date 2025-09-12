@@ -123,7 +123,7 @@ You can preview a local GeoParquet grid with the viewer:
 
     bash scripts/grids/view_grid.sh --input path/to/grid_nodes.parquet --output grid_map.html
 
-The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[2]. For option details, see `docs/grids.md`.
+The grid dataset follows GeoParquet conventions: the `geometry` column encodes Point features in WKB and declares WGS84 as the CRS[2]. For option details, see [docs/grids.md](docs/grids.md).
 
 ### 3. Radar Data Mapping
 
@@ -152,7 +152,7 @@ The grid dataset follows GeoParquet conventions: the `geometry` column encodes P
       --distance-km 5 \
       --profile my-aws
 
-After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see `docs/grids.md`.
+After this step, you have a table of row-to-node links ready for analysis. For grid table structure and creation details, see [docs/grids.md](docs/grids.md).
 
 ### 4. Aggregation and Analysis
 
@@ -328,10 +328,10 @@ For details on the underlying conventions, see the HF‑EOLUS specification repo
 
 ## Utility Documentation
 
-- Hulls: docs/hulls.md
-- Grids: docs/grids.md
-- Mapping: docs/mapping.md
-- Aggregation: docs/aggregation.md
+- Hulls: [docs/hulls.md](docs/hulls.md)
+- Grids: [docs/grids.md](docs/grids.md)
+- Mapping: [docs/mapping.md](docs/mapping.md)
+- Aggregation: [docs/aggregation.md](docs/aggregation.md)
 
 ## Acknowledgements
 
@@ -345,23 +345,15 @@ This software is provided "as is", without warranty of any kind, express or impl
 
 ## References
 
-[1] overview.md
+- [Overview][1]
+- [GeoParquet spec][2]
+- [STAC spec][3]
+- [HF‑EOLUS GeoParquet and STAC spec repository (README)][4]
 
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/overview.md>
-
-[2] geoparquet_specs.md
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md>
-
-[3] stac_specs.md
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/stac_specs.md>
-
-[4] HF‑EOLUS GeoParquet and STAC specification repository (README)
-
-<https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs/blob/HEAD/README.md>
-
-[HF-EOLUS GeoParquet and STAC specification repository]: https://github.com/GOFUVI/hf_eouls_geoparquet_stac_specs
+[1]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/overview.md
+[2]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/geoparquet_specs.md
+[3]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/stac_specs.md
+[4]: https://github.com/GOFUVI/hf_eolus_geoparquet_stac_specs/blob/HEAD/README.md
 
 ---
 <p align="center">
