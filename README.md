@@ -255,7 +255,26 @@ Finalization details (consolidation)
   It then syncs back to the same S3 prefix (excluding Athena `*_athena*` and `query_results/` folders). If `--partition-cols` is provided, it runs `MSCK REPAIR TABLE` so Glue discovers the final partition layout.
 - Geometry column: Use `--geometry-column` if your geometry field is not `geometry`. Metadata is written to the Parquet file’s `geo` block so GIS/GeoPandas can open it directly and Athena can recognize geo semantics.
 - Safety and space: The process rewrites objects under the target prefix (with `--delete` on sync back). Ensure no concurrent writers. You need enough local disk to hold a copy of the dataset during the merge; the temporary working dir lives under `--log-dir`.
-- Region and logs: The script runs with region `eu-west-3` by default and logs all steps under `--log-dir` as `<script>_<table>.log`, plus the SQL used for partition repair when applicable. See [docs/aggregation.md] for more.
+ - Region and logs: The script runs with region `eu-west-3` by default and logs all steps under `--log-dir` as `<script>_<table>.log`, plus the SQL used for partition repair when applicable. See [docs/aggregation.md] for more.
+
+## Athena Utilities
+
+*Script:* `scripts/athena_utils/create_half_hour_view.sh` — Create or replace an Athena view that selects all columns from a source table and adds a new column with the timestamp rounded to the nearest half hour (ties round down at :15 and :45). See [docs/athena_utils.md] for full details.
+
+**Quick example:**
+
+```
+bash scripts/athena_utils/create_half_hour_view.sh \
+  --source-db raw_db \
+  --source-table events \
+  --timestamp-col ts \
+  --new-column-name ts_half_hour \
+  --view-db analytics \
+  --view-name events_halfhour \
+  --profile my-aws
+```
+
+The script validates the source table in Glue, generates the SQL, executes `CREATE OR REPLACE VIEW` in Athena, and waits for completion. Optional flags include `--region`, `--results-s3`, and `--quote-identifiers`.
 
 ## STAC Catalog and Data Specifications
 
@@ -370,6 +389,7 @@ For details on the underlying conventions, see the HF‑EOLUS specification repo
 - Grids: [docs/grids.md]
 - Mapping: [docs/mapping.md]
 - Aggregation: [docs/aggregation.md]
+- Athena Utilities: [docs/athena_utils.md]
 
 ## Acknowledgements
 
@@ -409,6 +429,7 @@ This software is provided "as is", without warranty of any kind, express or impl
 [docs/grids.md]: docs/grids.md
 [docs/mapping.md]: docs/mapping.md
 [docs/aggregation.md]: docs/aggregation.md
+[docs/athena_utils.md]: docs/athena_utils.md
 
 ---
 <p align="center">
