@@ -133,3 +133,98 @@ FROM <source_db>.<source_table> t;
 - View creation does not write data to S3; `--results-s3` only controls the Athena query’s output location.
 - If you need a materialized column (not just a view), create a CTAS table using the same rounding expression.
 
+---
+
+## `create_constant_node_id_view.sh`
+
+Creates or replaces an Athena view that selects all columns from a source table and adds a constant-valued column. By default the column is named `node_id`, and you can control its value and type.
+
+Path: `scripts/athena_utils/create_constant_node_id_view.sh`
+
+### Requirements
+
+- Bash
+- AWS CLI configured (`aws configure` or profiles)
+- `jq` for CLI JSON parsing
+
+### Usage
+
+```bash
+./scripts/athena_utils/create_constant_node_id_view.sh \
+  --source-db <SOURCE_DB> \
+  --source-table <SOURCE_TABLE> \
+  --view-db <VIEW_DB> \
+  --view-name <VIEW_NAME> \
+  --node-id <VALUE> \
+  [--node-id-type <SQL_TYPE>] \
+  [--column-name <COLUMN_NAME>] \
+  [--profile <AWS_PROFILE>] \
+  [--results-s3 s3://bucket/prefix] \
+  [--region <REGION>] \
+  [--quote-identifiers] \
+  [--log-dir <LOG_DIR>]
+```
+
+### Parameters
+
+`--source-db`, `--source-table`
+: Athena database and table to read from. Required.
+
+`--view-db`, `--view-name`
+: Athena database and view name to create/replace. Required.
+
+`--node-id`
+: Constant value to assign. Required. If `--node-id-type` is not set, it is treated as a VARCHAR literal.
+
+`--node-id-type`
+: Optional SQL type for the constant (e.g., `bigint`, `varchar`, `double`, `decimal(10,2)`). When provided, the value is inserted as `CAST('<value>' AS <type>)`.
+
+`--column-name`
+: Name of the new column. Default: `node_id`.
+
+Other flags mirror those in `create_half_hour_view.sh` (`--profile`, `--results-s3`, `--region`, `--quote-identifiers`, `--log-dir`).
+
+### Examples
+
+- BIGINT node ID
+
+```bash
+./scripts/athena_utils/create_constant_node_id_view.sh \
+  --source-db raw_db \
+  --source-table events \
+  --view-db analytics \
+  --view-name events_n42 \
+  --node-id 42 \
+  --node-id-type bigint
+```
+
+- VARCHAR node ID (default type)
+
+```bash
+./scripts/athena_utils/create_constant_node_id_view.sh \
+  --source-db raw_db \
+  --source-table events \
+  --view-db analytics \
+  --view-name events_N42 \
+  --node-id N42
+```
+
+### SQL Logic
+
+The script generates and executes:
+
+```sql
+CREATE OR REPLACE VIEW <view_db>.<view_name> AS
+SELECT
+  t.*,
+  <constant_literal> AS <column_name>
+FROM <source_db>.<source_table> t;
+```
+
+Where `<constant_literal>` is either `'<value>'` (VARCHAR) or `CAST('<value>' AS <SQL_TYPE>)` if `--node-id-type` is provided.
+
+### Notes
+
+- The script validates the source table exists in Glue before executing.
+- The generated SQL is saved as `<log_dir>/create_constant_node_id_view_<db>_<view>.view.sql`.
+- Use `--quote-identifiers` if your identifiers contain special characters or match reserved words.

@@ -259,9 +259,9 @@ Finalization details (consolidation)
 
 ## Athena Utilities
 
-*Script:* `scripts/athena_utils/create_half_hour_view.sh` — Create or replace an Athena view that selects all columns from a source table and adds a new column with the timestamp rounded to the nearest half hour (ties round down at :15 and :45). See [docs/athena_utils.md] for full details.
+Scripts in `scripts/athena_utils/` help with lightweight Athena view creation. See [docs/athena_utils.md] for full details.
 
-**Quick example:**
+**Half-hour rounding view:**
 
 ```
 bash scripts/athena_utils/create_half_hour_view.sh \
@@ -274,7 +274,22 @@ bash scripts/athena_utils/create_half_hour_view.sh \
   --profile my-aws
 ```
 
-The script validates the source table in Glue, generates the SQL, executes `CREATE OR REPLACE VIEW` in Athena, and waits for completion. Optional flags include `--region`, `--results-s3`, and `--quote-identifiers`.
+Adds a column with the timestamp rounded to the nearest half hour (ties round down at :15 and :45). Validates the source table in Glue and waits for query completion.
+
+**Constant node_id view:**
+
+```
+bash scripts/athena_utils/create_constant_node_id_view.sh \
+  --source-db raw_db \
+  --source-table events \
+  --view-db analytics \
+  --view-name events_n42 \
+  --node-id 42 \
+  --node-id-type bigint \
+  --profile my-aws
+```
+
+Adds a constant-valued column (default name `node_id`) to the view. Use `--node-id-type` to control the SQL type (e.g., `bigint`, `varchar`).
 
 ## STAC Catalog and Data Specifications
 
